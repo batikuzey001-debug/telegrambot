@@ -1,14 +1,24 @@
 import os
-from pyrogram import Client, filters
+import json
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+# Railway Variables içine ekleyeceğiz
+svc_json = os.getenv("SVC_JSON")
+creds = service_account.Credentials.from_service_account_info(json.loads(svc_json))
 
-app = Client("testbot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# Google Sheets API bağlan
+service = build("sheets", "v4", credentials=creds)
 
-@app.on_message(filters.command("start"))
-async def start_handler(_, m):
-    await m.reply_text("✅ Çalışıyorum! (/start)")
+# Senin sheet ID
+SPREADSHEET_ID = "1nSKu_maQ7qxcyloMy18j4DBaocqEvDehNeP3Vf_V8xQ"
+RANGE_NAME = "PersonelListesi!A1:E10"  # ilk 10 satır test
 
-app.run()
+result = service.spreadsheets().values().get(
+    spreadsheetId=SPREADSHEET_ID, range=RANGE_NAME
+).execute()
+
+values = result.get("values", [])
+print("=== PersonelListesi Test Çıktısı ===")
+for row in values:
+    print(row)
