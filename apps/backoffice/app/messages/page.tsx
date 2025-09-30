@@ -1,4 +1,3 @@
-// apps/backoffice/app/messages/page.tsx
 "use client";
 import { useEffect, useMemo, useState } from "react";
 
@@ -12,41 +11,51 @@ export default function MessagesPage() {
   const [imageUrl, setImageUrl] = useState("");
   const [status, setStatus] = useState("");
 
-  // Liste yükle
+  // Listeyi yükle
+  async function loadAll() {
+    setStatus("Yükleniyor...");
+    try {
+      const r = await fetch("/api/messages", { cache: "no-store" });
+      const d = await r.json().catch(() => []);
+      const arr: Msg[] = Array.isArray(d) ? d : [];
+      setItems(arr);
+      if (arr.length && !sel) {
+        setSel(arr[0].key);
+        setContent(arr[0].content || "");
+        setImageUrl(arr[0].image_url || "");
+      }
+      setStatus(arr.length ? "" : "Kayıt yok.");
+    } catch {
+      setStatus("API erişilemedi.");
+      setItems([]);
+    }
+  }
+
+  useEffect(() => { loadAll(); /* eslint-disable-next-line */ }, []);
+
+  // Seçim değişince tek kaydı çek (cache yok)
   useEffect(() => {
+    if (!sel) return;
     (async () => {
-      setStatus("Yükleniyor...");
+      setStatus("Seçim getiriliyor...");
       try {
-        const r = await fetch("/api/messages", { cache: "no-store" });
-        const d = await r.json().catch(() => []);
-        const arr: Msg[] = Array.isArray(d) ? d : [];
-        setItems(arr);
-        if (arr.length && !sel) {
-          setSel(arr[0].key);
-          setContent(arr[0].content || "");
-          setImageUrl(arr[0].image_url || "");
+        const r = await fetch(`/api/messages/${sel}`, { cache: "no-store" });
+        const d = await r.json();
+        if (r.ok && d) {
+          setContent(d.content || "");
+          setImageUrl(d.image_url || "");
+          setStatus("");
+        } else {
+          setStatus(`Hata: ${d?.error || r.status}`);
         }
-        setStatus(arr.length ? "" : "Kayıt yok.");
       } catch {
-        setStatus("API erişilemedi.");
-        setItems([]);
+        setStatus("Seçim yüklenemedi.");
       }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Seçim değişince formu doldur
-  useEffect(() => {
-    const m = items.find((x) => x.key === sel);
-    if (m) {
-      setContent(m.content || "");
-      setImageUrl(m.image_url || "");
-      setStatus("");
-    }
-  }, [sel, items]);
+  }, [sel]);
 
   const filtered = useMemo(
-    () => items.filter((i) => i.key.toLowerCase().includes(q.toLowerCase())),
+    () => items.filter((i) => (i.key || "").toLowerCase().includes(q.toLowerCase())),
     [items, q]
   );
 
@@ -57,18 +66,22 @@ export default function MessagesPage() {
       const res = await fetch(`/api/messages/${sel}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content, image_url: imageUrl || null }),
+        body: JSON.stringify({ content, image_url: imageUrl || null })
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok || body?.ok === false) {
-        setStatus(`Hata: ${body?.data?.error || body?.error || res.status}`);
+        setStatus(`Hata: ${body?.error || body?.data?.error || res.status}`);
         return;
       }
-      // Yerel listeyi güncelle
+      // Yerelde güncelle
       setItems((prev) =>
         prev.map((x) => (x.key === sel ? { ...x, content, image_url: imageUrl } : x))
       );
-      setStatus("Kaydedildi. Bot cache temizlendi.");
+      // Tek kaydı tekrar çek -> updated_at vs.
+      await new Promise((r) => setTimeout(r, 150)); // çok hızlıyse UI'da çakışmasın
+      const latest = await fetch(`/api/messages/${sel}`, { cache: "no-store" }).then((r) => r.json()).catch(() => null);
+      if (latest?.content) setContent(latest.content);
+      setStatus(body?.invalidated ? "Kaydedildi. Bot önbelleği temizlendi." : "Kaydedildi.");
     } catch (e: any) {
       setStatus(`Ağ hatası: ${String(e)}`);
     }
@@ -116,23 +129,13 @@ export default function MessagesPage() {
         <input value={imageUrl} onChange={(e) => setImageUrl(e.target.value)} placeholder="https://..." />
 
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <button onClick={save} disabled={!sel}>
-            Kaydet
-          </button>
+          <button onClick={save} disabled={!sel}>Kaydet</button>
           {status && <span>{status}</span>}
         </div>
 
         {/* Önizleme */}
         <div style={{ marginTop: 16 }}>
-          <div
-            style={{
-              width: 360,
-              border: "1px solid #ddd",
-              borderRadius: 8,
-              padding: 12,
-              background: "#f8fafc",
-            }}
-          >
+          <div style={{ width: 360, border: "1px solid #ddd", borderRadius: 8, padding: 12, background: "#f8fafc" }}>
             <div style={{ fontSize: 12, color: "#64748b", marginBottom: 6 }}>Telegram Önizleme</div>
             {imageUrl ? (
               <figure>
