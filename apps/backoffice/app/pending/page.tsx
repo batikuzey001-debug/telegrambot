@@ -6,7 +6,6 @@ type Pending = { id:number; external_id:string; provided_membership_id?:string|n
 export default function PendingPage() {
   const [items, setItems] = useState<Pending[]>([]);
   const [msg, setMsg] = useState("");
-  const [mid, setMid] = useState("");
 
   const load = async () => {
     setMsg("");
@@ -17,37 +16,44 @@ export default function PendingPage() {
 
   useEffect(()=>{ load(); }, []);
 
-  const act = async (id:number, action:"approve"|"reject") => {
+  const approve = async (p: Pending) => {
     setMsg("");
-    const body: any = { action };
-    if (action === "approve") body.membership_id = mid;
-    const r = await fetch(`/api/admin/pending/${id}`, {
+    const r1 = await fetch(`/api/admin/pending/${p.id}`, {
       method: "PUT",
-      headers: { "Content-Type":"application/json" },
-      body: JSON.stringify(body)
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "approve" })
     });
-    if (r.ok && action==="approve" && mid) {
-      // eşle
-      const item = items.find(i=>i.id===id);
-      if (item) {
-        await fetch("/api/admin/users/link", {
-          method: "PUT",
-          headers: { "Content-Type":"application/json" },
-          body: JSON.stringify({ external_id: item.external_id, membership_id: mid })
-        });
-      }
-    }
-    setMsg(r.ok ? "Güncellendi" : "Hata");
-    setMid("");
+    const d1 = await r1.json();
+    if (!r1.ok) { setMsg("Onay hatası"); return; }
+
+    // Kullanıcıya bildirim
+    const r2 = await fetch("/api/admin/notify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        external_id: d1.external_id || p.external_id,
+        text: "✅ Üyeliğiniz onaylanmıştır. Hoş geldiniz!"
+      })
+    });
+
+    setMsg(r2.ok ? "Onaylandı ve bildirildi" : "Onaylandı, bildirim başarısız");
+    load();
+  };
+
+  const reject = async (p: Pending) => {
+    setMsg("");
+    const r = await fetch(`/api/admin/pending/${p.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "reject" })
+    });
+    setMsg(r.ok ? "Reddedildi" : "Reddetme hatası");
     load();
   };
 
   return (
     <div>
       <h1>Bekleyen Doğrulamalar</h1>
-      <div style={{ marginBottom: 8 }}>
-        <input placeholder="Onay için üyelik ID" value={mid} onChange={e=>setMid(e.target.value)} />
-      </div>
       <table border={1} cellPadding={6} style={{ borderCollapse:"collapse", width:"100%" }}>
         <thead><tr><th>ID</th><th>Telegram ID</th><th>Yazılan ID</th><th>Ad Soyad</th><th>Tarih</th><th>İşlem</th></tr></thead>
         <tbody>
@@ -59,8 +65,8 @@ export default function PendingPage() {
               <td>{p.full_name}</td>
               <td>{new Date(p.created_at).toLocaleString()}</td>
               <td style={{ display:"flex", gap:8 }}>
-                <button onClick={()=>act(p.id,"approve")} disabled={!mid}>Onayla</button>
-                <button onClick={()=>act(p.id,"reject")}>Reddet</button>
+                <button onClick={()=>approve(p)}>Onayla</button>
+                <button onClick={()=>reject(p)}>Reddet</button>
               </td>
             </tr>
           ))}
