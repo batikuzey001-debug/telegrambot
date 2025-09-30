@@ -1,4 +1,5 @@
 export const metadata = { title: "Backoffice" };
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="tr">
@@ -10,6 +11,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <a href="/dashboard" style={{ color: "#fff" }}>Dashboard</a>
               <a href="/users" style={{ color: "#fff" }}>Kullanıcılar</a>
               <a href="/messages" style={{ color: "#fff" }}>Mesajlar</a>
+              <a href="/members" style={{ color: "#fff" }}>Üyeler</a>
+              <a href="/pending" style={{ color: "#fff" }}>Bekleyen Doğrulamalar</a>
+              <a href="/raffle" style={{ color: "#fff" }}>Çekiliş Katılımcıları</a>
+              <a href="/raffles" style={{ color: "#fff" }}>Özel Kampanyalar</a>
             </nav>
           </aside>
           <main style={{ flex: 1, padding: 24 }}>{children}</main>
