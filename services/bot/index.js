@@ -96,7 +96,7 @@ const KB = {
 };
 
 // State
-const state = new Map(); // uid -> { stage:'ROOT'|'MEMBER'|'GUEST'|'PENDING', awaiting?, tmpMembership?, newUser? }
+const state = new Map(); // uid -> { stage, awaiting?, newUser? }
 const S = uid => { if(!state.has(uid)) state.set(uid,{ stage:"ROOT" }); return state.get(uid); };
 
 // Render helpers
@@ -105,12 +105,8 @@ const showMember  = (ctx,name)=> ctx.reply(name?`👋 Merhaba ${name}\n🧭 Üye
 const showGuest   = (ctx)=> ctx.reply("🧭 Misafir menüsü:", KB.GUEST_HOME);
 const showPending = (ctx)=> ctx.reply("⏳ Başvurunuz inceleniyor. Onaylanınca üyelik ana sayfanız açılacak.", KB.PENDING_HOME);
 
-// Başlangıç
-bot.start(async (ctx)=>{
-  await sendMessageByKey(ctx,"welcome");
-  const ok = await isChannelMember(ctx);
-  if(!ok) return sendMessageByKey(ctx,"not_member",KB.JOIN);
-
+// Tek giriş noktası: statüye göre yönlendir
+async function routeHome(ctx){
   const st = await getStatus(String(ctx.from.id));
   if (st.stage === "member") {
     const name = [st.user?.first_name, st.user?.last_name].filter(Boolean).join(" ");
@@ -123,6 +119,14 @@ bot.start(async (ctx)=>{
   }
   S(ctx.from.id).stage = "ROOT";
   return showRoot(ctx);
+}
+
+// Başlangıç
+bot.start(async (ctx)=>{
+  await sendMessageByKey(ctx,"welcome");
+  const ok = await isChannelMember(ctx);
+  if(!ok) return sendMessageByKey(ctx,"not_member",KB.JOIN);
+  return routeHome(ctx);
 });
 
 // Kanal kontrol
@@ -131,37 +135,48 @@ bot.action("verify_join", async (ctx)=>{
   await ctx.answerCbQuery(ok?"✅ Doğrulandı":"⛔ Üye görünmüyor");
   if(!ok) return;
   try{ await ctx.editMessageText("✅ Teşekkürler. Devam edebilirsiniz."); }catch{}
-  return showRoot(ctx);
+  return routeHome(ctx);
 });
 
-// ROOT → Üyelik akışı (KULLANICI ADI → ID → ONAY)
+// Ana menü butonu da statüye göre yönlendirir
+bot.action("go_root", (ctx)=> routeHome(ctx));
+
+// ROOT → Üyelik akışı (kayıtlıysa asla başlamaz)
 bot.action("role_member", async (ctx)=>{
+  const st = await getStatus(String(ctx.from.id));
+  if (st.stage === "member") return showMember(ctx, [st.user?.first_name, st.user?.last_name].filter(Boolean).join(" "));
+  if (st.stage === "pending") return showPending(ctx);
+
   const s = S(ctx.from.id);
   s.newUser = { username: null, id: null };
   s.awaiting = "username";
   await ctx.reply("🧾 RadissonBet kullanıcı adınız nedir?");
 });
 
+// Metin girişleri (kayıtlı üyelerde blokla)
 bot.on("text", async (ctx)=>{
+  const st = await getStatus(String(ctx.from.id));
+  if (st.stage === "member") return showMember(ctx, [st.user?.first_name, st.user?.last_name].filter(Boolean).join(" "));
+  if (st.stage === "pending") return showPending(ctx);
+
   const s = S(ctx.from.id);
   const text = (ctx.message.text || "").trim();
 
   // 1) Kullanıcı adı
   if (s.awaiting === "username") {
     if (!text || text.length < 2) return ctx.reply("⚠️ Geçerli bir kullanıcı adı yazın.");
-    s.newUser.username = text;
+    s.newUser = { ...(s.newUser||{}), username: text };
     s.awaiting = "membership";
-    return ctx.reply("🔢 Üyelik ID’nizi girin (sadece rakam):");
+    return ctx.reply("🔢 Üyelik numaranızı girin (sadece rakam):");
   }
 
   // 2) Üyelik ID
   if (s.awaiting === "membership") {
-    if (!/^[0-9]+$/.test(text)) return ctx.reply("⚠️ Geçersiz ID. Sadece rakam girin.");
-    s.newUser.id = text;
+    if (!/^[0-9]+$/.test(text)) return ctx.reply("⚠️ Geçersiz numara. Sadece rakam girin.");
+    s.newUser = { ...(s.newUser||{}), id: text };
 
-    // 3) ONAY PANELİ
     const confirmText =
-      "🧩 Bilgilerini Onayla ℹ️\n" +
+      "🧩 Bilgilerini Onayla\n" +
       "~~~~~~~~~~~~~~~~~~~~\n" +
       `👤 Kullanıcı adı: ${s.newUser.username}\n` +
       `🪪 Üyelik numarası: ${s.newUser.id}\n` +
@@ -175,11 +190,9 @@ bot.on("text", async (ctx)=>{
     s.awaiting = "confirm";
     return ctx.reply(confirmText, kb);
   }
-
-  // 4) (fullname adımı kullanılmıyor – pending'e gerek yoksa kaldırılabilir)
 });
 
-// ONAY AKIŞ BUTONLARI
+// ONAY AKIŞI
 bot.action("confirm_restart", async (ctx)=>{
   const s = S(ctx.from.id);
   s.newUser = { username:null, id:null };
@@ -197,7 +210,7 @@ bot.action("confirm_yes", async (ctx)=>{
   const s = S(ctx.from.id);
   if (!s?.newUser?.id || !s?.newUser?.username) {
     await ctx.answerCbQuery("⚠️ Eksik bilgi").catch(()=>{});
-    return showRoot(ctx);
+    return routeHome(ctx);
   }
   try{
     const { data } = await api.get(`/members/${s.newUser.id}`);
@@ -211,42 +224,29 @@ bot.action("confirm_yes", async (ctx)=>{
         tg_last_name:  ctx.from.last_name  || null,
         tg_username:   ctx.from.username   || null
       });
-      s.stage = "MEMBER"; s.awaiting = undefined;
-      const name = [data.first_name, data.last_name].filter(Boolean).join(" ");
-      try { await ctx.editMessageText(`✅ Hoş geldiniz ${name || ""}`.trim()); } catch {}
-      s.newUser = undefined;
-      return showMember(ctx, name);
+      s.awaiting = undefined; s.newUser = undefined;
+      return routeHome(ctx);
     } else {
-      // Üye listesinde yoksa beklemeye alma (fullname sormadan)
+      // Üye listesinde yoksa bekleme (fullname istemiyoruz)
       await api.post(`/pending-requests`, {
         external_id: String(ctx.from.id),
         provided_membership_id: s.newUser.id,
         full_name: (ctx.from.first_name || "") + (ctx.from.last_name ? " " + ctx.from.last_name : "")
       }).catch(()=>{});
-      s.awaiting = undefined; s.stage = "PENDING"; s.newUser = undefined;
-      try { await ctx.editMessageText("📩 Talebiniz alındı. Onay bekleniyor."); } catch {}
-      return showPending(ctx);
+      s.awaiting = undefined; s.newUser = undefined;
+      return routeHome(ctx);
     }
-  }catch(e){
-    console.error("confirm_yes error:", e?.message);
+  }catch{
     await ctx.answerCbQuery("⚠️ Doğrulama yapılamadı").catch(()=>{});
-    return showRoot(ctx);
+    return routeHome(ctx);
   }
 });
 
 // Pending yenile
-bot.action("p_refresh", async (ctx)=>{
-  const st = await getStatus(String(ctx.from.id));
-  if (st.stage === "member") {
-    const name = [st.user?.first_name, st.user?.last_name].filter(Boolean).join(" ");
-    S(ctx.from.id).stage = "MEMBER";
-    return showMember(ctx, name);
-  }
-  return ctx.answerCbQuery("⏳ Hâlâ beklemede").catch(()=>{});
-});
+bot.action("p_refresh", (ctx)=> routeHome(ctx));
 
-// Guest
-bot.action("role_guest", async (ctx)=>{ S(ctx.from.id).stage="GUEST"; return showGuest(ctx); });
+// Guest panelleri
+bot.action("role_guest", (ctx)=> { S(ctx.from.id).stage="GUEST"; return showGuest(ctx); });
 bot.action("g_signup", async (ctx)=>{
   const kb = SIGNUP_URL
     ? Markup.inlineKeyboard([[Markup.button.url("📝 Kayıt Ol", SIGNUP_URL)],[Markup.button.callback("↩️ Geri","go_guest")]])
@@ -261,7 +261,7 @@ bot.action("g_benefits", async (ctx)=>{
 });
 bot.action("g_events",   (ctx)=> sendMessageByKey(ctx,"events",KB.GUEST_HOME));
 bot.action("g_campaigns",(ctx)=> ctx.reply("📢 Kampanyalar (katılmak için üye olunmalı).", KB.GUEST_HOME));
-bot.action("go_guest",   (ctx)=> ctx.reply("🧭 Misafir menüsü:", KB.GUEST_HOME));
+bot.action("go_guest",   (ctx)=> showGuest(ctx));
 
 // Member panelleri (sadece üye)
 async function requireMember(ctx){
@@ -281,7 +281,9 @@ bot.action("m_campaigns", async (ctx)=>{
     return ctx.reply("📢 Aktif kampanyalar:", Markup.inlineKeyboard([...rows,[Markup.button.callback("↩️ Geri","go_member")]]));
   }catch{ return ctx.reply("⚠️ Kampanyalar alınamadı.", KB.MEMBER_HOME); }
 });
-bot.action("go_member", (ctx)=> ctx.reply("🧭 Üyelik menüsü:", KB.MEMBER_HOME));
+bot.action("go_member", (ctx)=> showMember(ctx));
+
+// Çekiliş (yalnız üye)
 bot.action("m_raffle", async (ctx)=>{
   if(!(await requireMember(ctx))) return;
   try{
@@ -291,9 +293,6 @@ bot.action("m_raffle", async (ctx)=>{
     return ctx.reply("⚠️ Çekiliş aktif değil.", KB.MEMBER_HOME);
   }catch{ return ctx.reply("⚠️ Çekiliş kaydı yapılamadı.", KB.MEMBER_HOME); }
 });
-
-// Ana menü
-bot.action("go_root", (ctx)=> showRoot(ctx));
 
 // Dinamik çekiliş (yalnız üye)
 bot.action(/raffle_join:.+/, async (ctx)=>{
@@ -307,14 +306,14 @@ bot.action(/raffle_join:.+/, async (ctx)=>{
   }catch{ await ctx.answerCbQuery("⚠️ Hata").catch(()=>{}); }
 });
 
-// Bilinmeyen callback → kök + log
+// Bilinmeyen callback → statüye göre ana menü
 bot.on("callback_query", async (ctx, next)=>{
   const d = ctx.callbackQuery?.data || "";
   const known = /^(role_|g_|m_|go_|p_refresh|confirm_|raffle_join:)/.test(d);
   if (!known) {
     console.warn("unknown cb:", d);
     await ctx.answerCbQuery("⚠️ Geçersiz seçim").catch(()=>{});
-    return showRoot(ctx);
+    return routeHome(ctx);
   }
   return next();
 });
@@ -322,8 +321,8 @@ bot.on("callback_query", async (ctx, next)=>{
 // Global hata
 bot.catch(async (err, ctx)=>{
   console.error("Bot error:", err);
-  try { await ctx.reply("⚠️ Hata oluştu. Menüye dönüyorum."); await showRoot(ctx); } catch {}
+  try { await ctx.reply("⚠️ Hata oluştu. Menüye dönüyorum."); await routeHome(ctx); } catch {}
 });
 
 bot.launch({ dropPendingUpdates: true });
-console.log("Bot: üyelik onayı + Telegram adlarıyla kalıcı eşleştirme.");
+console.log("Bot: statüye göre yönlendirme; kayıtlı kullanıcı tekrar kayıt akışına girmez.");
