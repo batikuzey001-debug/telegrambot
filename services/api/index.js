@@ -1,5 +1,7 @@
 import express from "express";
 import pkg from "pg";
+import fetch from "node-fetch";
+
 const { Pool } = pkg;
 
 const pool = new Pool({
@@ -7,8 +9,14 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false
 });
 
+const app = express();
+app.use(express.json());
+
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";              // Backoffice çağrıları için basit koruma
+const BOT_INVALIDATE_URL = process.env.BOT_INVALIDATE_URL || ""; // ör: https://<bot>.up.railway.app/invalidate
+const CACHE_SECRET = process.env.CACHE_SECRET || "";
+
 async function initDb() {
-  // Neden: Railway'de migration koşmadan ayakta kalkabilsin.
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id BIGSERIAL PRIMARY KEY,
@@ -25,6 +33,7 @@ async function initDb() {
       id BIGSERIAL PRIMARY KEY,
       key TEXT UNIQUE NOT NULL,
       content TEXT NOT NULL,
+      image_url TEXT,
       active BOOLEAN NOT NULL DEFAULT TRUE,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
@@ -33,7 +42,7 @@ async function initDb() {
       id BIGSERIAL PRIMARY KEY,
       title TEXT NOT NULL,
       action TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'guest',   -- 'member' | 'guest'
+      role TEXT NOT NULL DEFAULT 'guest',
       order_index INT NOT NULL DEFAULT 0,
       active BOOLEAN NOT NULL DEFAULT TRUE,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -50,7 +59,7 @@ async function initDb() {
     INSERT INTO messages (key, content) VALUES
       ('welcome', 'Merhaba, hoş geldiniz!'),
       ('not_member', 'Devam için resmi kanala katılın.'),
-      ('default', 'Anlayamadım, menüden seçin.')
+      ('events', 'Güncel etkinlik bulunamadı.')
     ON CONFLICT (key) DO NOTHING;
 
     INSERT INTO menu_options (title, action, role, order_index) VALUES
@@ -65,29 +74,51 @@ async function initDb() {
   `);
 }
 
-const app = express();
-app.use(express.json());
-
 app.get("/", (_req, res) => res.json({ ok: true }));
 
-// Messages
+// Mesaj oku (metin + görsel)
 app.get("/messages/:key", async (req, res) => {
   const { rows } = await pool.query(
-    "SELECT content FROM messages WHERE key = $1 AND active = true LIMIT 1",
+    "SELECT content, image_url FROM messages WHERE key = $1 AND active = true LIMIT 1",
     [req.params.key]
   );
   if (!rows.length) return res.status(404).json({ error: "not_found" });
-  res.json({ key: req.params.key, content: rows[0].content });
+  res.json(rows[0]);
 });
 
-// Menu by role
-app.get("/menu", async (req, res) => {
-  const role = (req.query.role || "guest").toString();
-  const { rows } = await pool.query(
-    "SELECT title, action FROM menu_options WHERE active = true AND role = $1 ORDER BY order_index ASC",
-    [role]
-  );
-  res.json(rows);
+// Admin: mesaj güncelle (content/image_url). Basit token kontrolü.
+app.put("/admin/messages/:key", async (req, res) => {
+  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  const { content, image_url } = req.body || {};
+  if (!content && !image_url) return res.status(400).json({ error: "no_changes" });
+
+  const q = `
+    INSERT INTO messages (key, content, image_url, active)
+    VALUES ($1, COALESCE($2, ''), $3, true)
+    ON CONFLICT (key) DO UPDATE SET
+      content = COALESCE($2, messages.content),
+      image_url = COALESCE($3, messages.image_url),
+      updated_at = now()
+    RETURNING key, content, image_url, updated_at
+  `;
+  const { rows } = await pool.query(q, [req.params.key, content || null, image_url || null]);
+
+  // Bot cache invalidate
+  if (BOT_INVALIDATE_URL && CACHE_SECRET) {
+    try {
+      await fetch(BOT_INVALIDATE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-cache-secret": CACHE_SECRET },
+        body: JSON.stringify({ key: req.params.key })
+      });
+    } catch (e) {
+      // Neden: Bot anlık erişilemeyebilir; içerik yine TTL ile güncellenecek.
+    }
+  }
+
+  res.json(rows[0]);
 });
 
 // Users upsert
@@ -106,17 +137,6 @@ app.post("/users", async (req, res) => {
   `;
   const { rows } = await pool.query(q, [external_id, name || null, membership_id || null]);
   res.json(rows[0]);
-});
-
-// Audit
-app.post("/audit", async (req, res) => {
-  const { user_id, action, meta } = req.body || {};
-  if (!action) return res.status(400).json({ error: "action required" });
-  const { rows } = await pool.query(
-    "INSERT INTO audit_logs (user_id, action, meta) VALUES ($1, $2, $3) RETURNING id",
-    [user_id || null, action, meta || {}]
-  );
-  res.json({ id: rows[0].id });
 });
 
 const port = process.env.PORT || 3000;
