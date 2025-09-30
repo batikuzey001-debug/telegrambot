@@ -15,6 +15,7 @@ app.use(express.json());
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 const BOT_INVALIDATE_URL = process.env.BOT_INVALIDATE_URL || "";
 const CACHE_SECRET = process.env.CACHE_SECRET || "";
+const BOT_WRITE_SECRET = process.env.BOT_WRITE_SECRET || ""; // bot file_id yazacak
 
 async function initDb() {
   await pool.query(`
@@ -22,6 +23,8 @@ async function initDb() {
       id BIGSERIAL PRIMARY KEY,
       external_id TEXT UNIQUE NOT NULL,
       name TEXT,
+      first_name TEXT,
+      last_name  TEXT,
       membership_id TEXT,
       preferences JSONB DEFAULT '{}'::jsonb,
       bonus JSONB DEFAULT '{}'::jsonb,
@@ -34,6 +37,7 @@ async function initDb() {
       key TEXT UNIQUE NOT NULL,
       content TEXT NOT NULL,
       image_url TEXT,
+      file_id TEXT,
       active BOOLEAN NOT NULL DEFAULT TRUE,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
@@ -46,7 +50,30 @@ async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
 
-    -- Tüm bot mesaj anahtarları (menü sabit, içerikler dinamik)
+    -- Üyelik master ve bekleyen talepler
+    CREATE TABLE IF NOT EXISTS members (
+      membership_id TEXT PRIMARY KEY,
+      first_name TEXT NOT NULL,
+      last_name  TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_membership_id ON members (membership_id);
+
+    CREATE TABLE IF NOT EXISTS pending_verifications (
+      id BIGSERIAL PRIMARY KEY,
+      external_id TEXT NOT NULL,
+      provided_membership_id TEXT,
+      full_name TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',   -- pending|approved|rejected
+      notes TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_verifications (status);
+    CREATE INDEX IF NOT EXISTS idx_pending_external ON pending_verifications (external_id);
+
+    -- Seed mesaj anahtarları
     INSERT INTO messages (key, content) VALUES
       ('welcome', 'Merhaba, hoş geldiniz!'),
       ('not_member', 'Devam için resmi kanala katılın.'),
@@ -62,43 +89,39 @@ async function initDb() {
 
 app.get("/", (_req, res) => res.json({ ok: true }));
 
-// Mesaj oku
+/* ---------- Messages ---------- */
 app.get("/messages/:key", async (req, res) => {
   const { rows } = await pool.query(
-    "SELECT content, image_url FROM messages WHERE key = $1 AND active = true LIMIT 1",
+    "SELECT content, image_url, file_id FROM messages WHERE key=$1 AND active=true LIMIT 1",
     [req.params.key]
   );
   if (!rows.length) return res.status(404).json({ error: "not_found" });
   res.json(rows[0]);
 });
 
-// Admin: tüm mesajları listele
 app.get("/admin/messages", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) {
+  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`)
     return res.status(401).json({ error: "unauthorized" });
-  }
   const { rows } = await pool.query(
-    "SELECT key, content, image_url, updated_at FROM messages WHERE active = true ORDER BY key ASC"
+    "SELECT key, content, image_url, file_id, updated_at FROM messages WHERE active=true ORDER BY key ASC"
   );
   res.json(rows);
 });
 
-// Admin: mesaj güncelle
 app.put("/admin/messages/:key", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) {
+  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`)
     return res.status(401).json({ error: "unauthorized" });
-  }
   const { content, image_url } = req.body || {};
   if (!content && !image_url) return res.status(400).json({ error: "no_changes" });
-
   const q = `
     INSERT INTO messages (key, content, image_url, active)
-    VALUES ($1, COALESCE($2, ''), $3, true)
+    VALUES ($1, COALESCE($2,''), $3, true)
     ON CONFLICT (key) DO UPDATE SET
-      content = COALESCE($2, messages.content),
+      content   = COALESCE($2, messages.content),
       image_url = COALESCE($3, messages.image_url),
-      updated_at = now()
-    RETURNING key, content, image_url, updated_at
+      file_id   = CASE WHEN $3 IS NOT NULL AND $3 <> messages.image_url THEN NULL ELSE messages.file_id END,
+      updated_at= now()
+    RETURNING key, content, image_url, file_id, updated_at
   `;
   const { rows } = await pool.query(q, [req.params.key, content || null, image_url || null]);
 
@@ -111,33 +134,153 @@ app.put("/admin/messages/:key", async (req, res) => {
       });
     } catch {}
   }
-
   res.json(rows[0]);
 });
 
-// Users upsert + list
-app.post("/users", async (req, res) => {
-  const { external_id, name, membership_id } = req.body || {};
-  if (!external_id) return res.status(400).json({ error: "external_id required" });
+// bot file_id yazsın
+app.put("/bot/messages/:key/file-id", async (req, res) => {
+  if ((req.headers["x-bot-secret"] || "") !== BOT_WRITE_SECRET)
+    return res.status(401).json({ error: "unauthorized" });
+  const { file_id } = req.body || {};
+  if (!file_id) return res.status(400).json({ error: "file_id_required" });
+  const { rows } = await pool.query(
+    "UPDATE messages SET file_id=$1, updated_at=now() WHERE key=$2 RETURNING key, file_id",
+    [file_id, req.params.key]
+  );
+  if (!rows.length) return res.status(404).json({ error: "not_found" });
+  res.json(rows[0]);
+});
 
+/* ---------- Users ---------- */
+app.post("/users", async (req, res) => {
+  const { external_id, name, first_name, last_name, membership_id } = req.body || {};
+  if (!external_id) return res.status(400).json({ error: "external_id required" });
   const q = `
-    INSERT INTO users (external_id, name, membership_id)
-    VALUES ($1, $2, $3)
+    INSERT INTO users (external_id, name, first_name, last_name, membership_id)
+    VALUES ($1, $2, $3, $4, $5)
     ON CONFLICT (external_id)
-    DO UPDATE SET name = EXCLUDED.name,
-                  membership_id = EXCLUDED.membership_id,
-                  updated_at = now()
-    RETURNING id, external_id, name, membership_id
+    DO UPDATE SET name=EXCLUDED.name,
+                  first_name=COALESCE(EXCLUDED.first_name, users.first_name),
+                  last_name =COALESCE(EXCLUDED.last_name,  users.last_name),
+                  membership_id=COALESCE(EXCLUDED.membership_id, users.membership_id),
+                  updated_at=now()
+    RETURNING id, external_id, name, first_name, last_name, membership_id
   `;
-  const { rows } = await pool.query(q, [external_id, name || null, membership_id || null]);
+  const { rows } = await pool.query(q, [
+    external_id, name || null, first_name || null, last_name || null, membership_id || null
+  ]);
   res.json(rows[0]);
 });
 
 app.get("/users", async (_req, res) => {
   const { rows } = await pool.query(
-    "SELECT id, external_id, name, membership_id FROM users ORDER BY id DESC LIMIT 500"
+    "SELECT id, external_id, name, first_name, last_name, membership_id FROM users ORDER BY id DESC LIMIT 500"
   );
   res.json(rows);
+});
+
+/* ---------- Members & Pending ---------- */
+// ID var mı?
+app.get("/members/:membership_id", async (req, res) => {
+  const { rows } = await pool.query(
+    "SELECT membership_id, first_name, last_name FROM members WHERE membership_id=$1 LIMIT 1",
+    [req.params.membership_id]
+  );
+  if (!rows.length) return res.json({ found: false });
+  const m = rows[0];
+  res.json({ found: true, membership_id: m.membership_id, first_name: m.first_name, last_name: m.last_name });
+});
+
+// CSV yerine JSON import (admin)
+app.post("/admin/members/import", async (req, res) => {
+  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`)
+    return res.status(401).json({ error: "unauthorized" });
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+  if (!rows.length) return res.status(400).json({ error: "empty" });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    for (const r of rows) {
+      if (!r.membership_id || !r.first_name || !r.last_name) continue;
+      await client.query(
+        `INSERT INTO members (membership_id, first_name, last_name)
+         VALUES ($1,$2,$3)
+         ON CONFLICT (membership_id) DO UPDATE SET
+         first_name=EXCLUDED.first_name, last_name=EXCLUDED.last_name, updated_at=now()`,
+        [String(r.membership_id), String(r.first_name), String(r.last_name)]
+      );
+    }
+    await client.query("COMMIT");
+    res.json({ ok: true, count: rows.length });
+  } catch (e) {
+    await client.query("ROLLBACK");
+    res.status(500).json({ error: "import_failed" });
+  } finally {
+    client.release();
+  }
+});
+
+// Bekleyen talep aç
+app.post("/pending-requests", async (req, res) => {
+  const { external_id, provided_membership_id, full_name, notes } = req.body || {};
+  if (!external_id || !full_name)
+    return res.status(400).json({ error: "external_id_and_full_name_required" });
+  const { rows } = await pool.query(
+    `INSERT INTO pending_verifications (external_id, provided_membership_id, full_name, notes)
+     VALUES ($1,$2,$3,$4) RETURNING id, status`,
+    [String(external_id), provided_membership_id || null, String(full_name), notes || null]
+  );
+  res.json(rows[0]);
+});
+
+// Bekleyenleri listele (admin)
+app.get("/admin/pending-requests", async (req, res) => {
+  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`)
+    return res.status(401).json({ error: "unauthorized" });
+  const status = (req.query.status || "pending").toString();
+  const { rows } = await pool.query(
+    "SELECT id, external_id, provided_membership_id, full_name, status, notes, created_at FROM pending_verifications WHERE status=$1 ORDER BY id DESC",
+    [status]
+  );
+  res.json(rows);
+});
+
+// Onay/ret (admin)
+app.put("/admin/pending-requests/:id", async (req, res) => {
+  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`)
+    return res.status(401).json({ error: "unauthorized" });
+  const { action, membership_id, notes } = req.body || {};
+  if (!["approve", "reject"].includes(action)) return res.status(400).json({ error: "invalid_action" });
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows: cur } = await client.query(
+      "SELECT * FROM pending_verifications WHERE id=$1 FOR UPDATE",
+      [req.params.id]
+    );
+    if (!cur.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "not_found" }); }
+
+    if (action === "approve") {
+      if (!membership_id) { await client.query("ROLLBACK"); return res.status(400).json({ error: "membership_id_required" }); }
+      await client.query(
+        "UPDATE pending_verifications SET status='approved', notes=$2, updated_at=now() WHERE id=$1",
+        [req.params.id, notes || null]
+      );
+    } else {
+      await client.query(
+        "UPDATE pending_verifications SET status='rejected', notes=$2, updated_at=now() WHERE id=$1",
+        [req.params.id, notes || null]
+      );
+    }
+    await client.query("COMMIT");
+    res.json({ ok: true });
+  } catch (e) {
+    await client.query("ROLLBACK");
+    res.status(500).json({ error: "update_failed" });
+  } finally {
+    client.release();
+  }
 });
 
 const port = process.env.PORT || 3000;
