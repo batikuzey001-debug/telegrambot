@@ -1,3 +1,4 @@
+// apps/backoffice/app/layout.tsx
 export const metadata = { title: "Backoffice" };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -13,8 +14,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <a href="/messages" style={{ color: "#fff" }}>Mesajlar</a>
               <a href="/members" style={{ color: "#fff" }}>Üyeler</a>
               <a href="/pending" style={{ color: "#fff" }}>Bekleyen Doğrulamalar</a>
-              <a href="/raffle" style={{ color: "#fff" }}>Çekiliş Katılımcıları</a>
-              <a href="/raffles" style={{ color: "#fff" }}>Özel Kampanyalar</a>
+              {/* Kampanya modülü */}
+              <a href="/raffles" style={{ color: "#fff" }}>Kampanyalar</a>
+              <a href="/raffle" style={{ color: "#fff" }}>Kampanya Katılımcıları</a>
+              {/* Bildirimler */}
               <a href="/notifications" style={{ color: "#fff" }}>Bildirimler</a>
             </nav>
           </aside>
