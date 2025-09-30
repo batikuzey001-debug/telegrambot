@@ -163,11 +163,11 @@ bot.on("text", async (ctx)=>{
     const confirmText =
       "🧩 Bilgilerini Onayla ℹ️\n" +
       "~~~~~~~~~~~~~~~~~~~~\n" +
-      `👤 Kullanıcı Adı : ${s.newUser.username}\n` +
-      `🪪 Üyelik ID     : ${s.newUser.id}\n` +
+      `👤 Kullanıcı adı: ${s.newUser.username}\n` +
+      `🪪 Üyelik numarası: ${s.newUser.id}\n` +
       "~~~~~~~~~~~~~~~~~~~~\n" +
-      "👉 Bilgiler doğruysa **Evet**, yanlışsa **Hayır**.\n" +
-      "Geri dönmek için **Başa Dön**.";
+      "👉 Doğruysa “Evet”, düzeltmek için “Hayır”.\n" +
+      "↩️ Baştan girmek için “Başa Dön”.";
     const kb = Markup.inlineKeyboard([
       [Markup.button.callback("✅ Evet", "confirm_yes"), Markup.button.callback("❌ Hayır", "confirm_no")],
       [Markup.button.callback("🔙 Başa Dön", "confirm_restart")]
@@ -176,21 +176,7 @@ bot.on("text", async (ctx)=>{
     return ctx.reply(confirmText, kb);
   }
 
-  // 4) FULLNAME (ID bulunamadı → pending)
-  if (s.awaiting === "fullname") {
-    const full = text.replace(/\s+/g, " ").trim();
-    if (!full.includes(" ")) return ctx.reply("⚠️ Lütfen ad ve soyadı birlikte yazın.");
-    try{
-      await api.post(`/pending-requests`, {
-        external_id:String(ctx.from.id),
-        provided_membership_id:s.newUser?.id || null,
-        full_name: full
-      });
-    }catch(e){ console.error("pending error:", e?.message); }
-    s.awaiting = undefined; s.tmpMembership=undefined; s.stage="PENDING"; s.newUser = undefined;
-    await ctx.reply("📩 Talebiniz alındı. Onay bekleniyor.");
-    return showPending(ctx);
-  }
+  // 4) (fullname adımı kullanılmıyor – pending'e gerek yoksa kaldırılabilir)
 });
 
 // ONAY AKIŞ BUTONLARI
@@ -216,21 +202,30 @@ bot.action("confirm_yes", async (ctx)=>{
   try{
     const { data } = await api.get(`/members/${s.newUser.id}`);
     if (data.found) {
+      // Telegram adları + yazılan kullanıcı adı ile kalıcı eşle
       await api.post(`/users`, {
-        external_id:String(ctx.from.id),
-        name: s.newUser.username,
-        first_name: data.first_name, last_name: data.last_name,
-        membership_id: s.newUser.id
+        external_id: String(ctx.from.id),
+        membership_id: s.newUser.id,
+        submitted_username: s.newUser.username,
+        tg_first_name: ctx.from.first_name || null,
+        tg_last_name:  ctx.from.last_name  || null,
+        tg_username:   ctx.from.username   || null
       });
       s.stage = "MEMBER"; s.awaiting = undefined;
-      const name = `${data.first_name} ${data.last_name}`;
-      try { await ctx.editMessageText(`✅ Hoş geldiniz ${name}`); } catch {}
+      const name = [data.first_name, data.last_name].filter(Boolean).join(" ");
+      try { await ctx.editMessageText(`✅ Hoş geldiniz ${name || ""}`.trim()); } catch {}
       s.newUser = undefined;
       return showMember(ctx, name);
     } else {
-      // ID eşleşmedi → fullname iste
-      s.awaiting = "fullname";
-      try { await ctx.editMessageText("❓ ID bulunamadı. Lütfen `Ad Soyad` yazın:"); } catch {}
+      // Üye listesinde yoksa beklemeye alma (fullname sormadan)
+      await api.post(`/pending-requests`, {
+        external_id: String(ctx.from.id),
+        provided_membership_id: s.newUser.id,
+        full_name: (ctx.from.first_name || "") + (ctx.from.last_name ? " " + ctx.from.last_name : "")
+      }).catch(()=>{});
+      s.awaiting = undefined; s.stage = "PENDING"; s.newUser = undefined;
+      try { await ctx.editMessageText("📩 Talebiniz alındı. Onay bekleniyor."); } catch {}
+      return showPending(ctx);
     }
   }catch(e){
     console.error("confirm_yes error:", e?.message);
@@ -331,4 +326,4 @@ bot.catch(async (err, ctx)=>{
 });
 
 bot.launch({ dropPendingUpdates: true });
-console.log("Bot: üyelik onayı (Evet/Hayır/Başa Dön) + nested menüler.");
+console.log("Bot: üyelik onayı + Telegram adlarıyla kalıcı eşleştirme.");
