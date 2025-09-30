@@ -1,11 +1,14 @@
 import { Telegraf, Markup } from "telegraf";
 import LocalSession from "telegraf-session-local";
+import axios from "axios";
 
-const { BOT_TOKEN, CHANNEL_USERNAME } = process.env;
+const { BOT_TOKEN, CHANNEL_USERNAME, APP_URL } = process.env;
 if (!BOT_TOKEN) throw new Error("BOT_TOKEN is required");
-if (!CHANNEL_USERNAME) throw new Error("CHANNEL_USERNAME is required"); // Örn: @resmikanal
+if (!CHANNEL_USERNAME) throw new Error("CHANNEL_USERNAME is required");
+if (!APP_URL) throw new Error("APP_URL is required"); // Örn: https://api-service-url.up.railway.app
 
 const bot = new Telegraf(BOT_TOKEN);
+bot.use(new LocalSession({ database: "session_db.json" }).middleware());
 
 // Session middleware (dosyaya kaydeder, Railway’de ephemeral disk; yine de çalışır)
 bot.use(new LocalSession({ database: "session_db.json" }).middleware());
@@ -124,3 +127,25 @@ bot.hears("Etkinlikler ve fırsatlar", (ctx) =>
 
 bot.launch();
 console.log("Bot with channel-gate and role menus running.");
+bot.on("text", async (ctx) => {
+  if (ctx.session.awaitingMembershipId) {
+    const idText = ctx.message.text?.trim();
+    if (idText) {
+      ctx.session.membershipId = idText;
+      ctx.session.awaitingMembershipId = false;
+
+      // API’ye kaydet
+      try {
+        await axios.post(`${APP_URL}/users`, {
+          external_id: String(ctx.from.id),
+          name: ctx.from.username || ctx.from.first_name,
+          membership_id: idText
+        });
+      } catch (err) {
+        console.error("API user save error:", err.message);
+      }
+
+      await ctx.reply("Üyelik ID’niz kaydedildi. Üyelik menüsü:", memberMenu);
+    }
+  }
+});
