@@ -1,16 +1,2 @@
-{
-  "name": "bot",
-  "private": true,
-  "type": "module",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "telegraf": "^4.16.3",
-    "axios": "^1.7.2",
-    "express": "^4.19.2",
-    "http": "^0.0.1-security",
-    "https": "^1.0.0"
-  }
-}
+{ "name":"bot","private":true,"type":"module","scripts":{"start":"node bot.js"},
+  "dependencies":{"axios":"^1.7.4","express":"^4.19.2","telegraf":"^4.16.3"} }
