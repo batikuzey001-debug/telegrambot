@@ -15,6 +15,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <a href="/pending" style={{ color: "#fff" }}>Bekleyen Doğrulamalar</a>
               <a href="/raffle" style={{ color: "#fff" }}>Çekiliş Katılımcıları</a>
               <a href="/raffles" style={{ color: "#fff" }}>Özel Kampanyalar</a>
+              <a href="/notifications" style={{ color: "#fff" }}>Bildirimler</a>
             </nav>
           </aside>
           <main style={{ flex: 1, padding: 24 }}>{children}</main>
