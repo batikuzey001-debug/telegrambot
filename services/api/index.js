@@ -1,3 +1,4 @@
+// services/api/index.js
 import express from "express";
 import pkg from "pg";
 import fetch from "node-fetch";
@@ -46,7 +47,7 @@ async function initDb() {
     );
   `);
 
-  // Idempotent ALTER’lar (eski DB’leri yükseltmek için)
+  // Idempotent ALTER (schema uplift)
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name  TEXT;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS membership_id TEXT;`);
@@ -152,6 +153,14 @@ app.get("/messages/:key", async (req, res) => {
   res.json(rows[0]);
 });
 
+// (opsiyonel debug) tüm mesajları listele
+app.get("/messages", async (_req, res) => {
+  const { rows } = await pool.query(
+    "SELECT key, content, image_url, file_id, updated_at FROM messages WHERE active=true ORDER BY key ASC"
+  );
+  res.json(rows);
+});
+
 app.get("/admin/messages", async (req, res) => {
   if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
   const { rows } = await pool.query(
@@ -164,6 +173,9 @@ app.put("/admin/messages/:key", async (req, res) => {
   if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
   const { content, image_url } = req.body || {};
   if (!content && !image_url) return res.status(400).json({ error: "no_changes" });
+
+  console.log("[PUT /admin/messages]", req.params.key); // debug log
+
   const q = `
     INSERT INTO messages (key, content, image_url, active)
     VALUES ($1, COALESCE($2,''), $3, true)
@@ -175,6 +187,7 @@ app.put("/admin/messages/:key", async (req, res) => {
     RETURNING key, content, image_url, file_id, updated_at
   `;
   const { rows } = await pool.query(q, [req.params.key, content || null, image_url || null]);
+
   if (BOT_INVALIDATE_URL && CACHE_SECRET) {
     try {
       await fetch(BOT_INVALIDATE_URL, {
@@ -182,7 +195,9 @@ app.put("/admin/messages/:key", async (req, res) => {
         headers: { "Content-Type": "application/json", "x-cache-secret": CACHE_SECRET },
         body: JSON.stringify({ key: req.params.key })
       });
-    } catch {}
+    } catch (e) {
+      console.warn("invalidate failed:", e?.message || e);
+    }
   }
   res.json(rows[0]);
 });
@@ -233,7 +248,6 @@ app.post("/users", async (req, res) => {
   res.json(rows[0]);
 });
 
-// users list with status (+telegram alanları)
 app.get("/users", async (_req, res) => {
   const q = `
     SELECT
@@ -263,7 +277,6 @@ app.get("/users", async (_req, res) => {
   res.json(rows);
 });
 
-// user by external id
 app.get("/users/by-external/:external_id", async (req, res) => {
   const { rows } = await pool.query(
     "SELECT id, external_id, first_name, last_name, membership_id FROM users WHERE external_id=$1 LIMIT 1",
@@ -273,7 +286,6 @@ app.get("/users/by-external/:external_id", async (req, res) => {
   res.json(rows[0]);
 });
 
-// user status (member|pending|guest)
 app.get("/users/status/:external_id", async (req, res) => {
   const ext = String(req.params.external_id);
   const ures = await pool.query(
@@ -355,7 +367,6 @@ app.get("/admin/pending-requests", async (req, res) => {
   res.json(rows);
 });
 
-// approve/reject: membership_id varsa users'a yaz; ad/soyadı pending'den böl
 app.put("/admin/pending-requests/:id", async (req, res) => {
   if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
   const { action, notes } = req.body || {};
@@ -463,6 +474,28 @@ app.post("/raffle/enter", async (req, res) => {
 
 app.get("/raffles/active", async (_req, res) => {
   const { rows } = await pool.query("SELECT key, title FROM raffles WHERE active=true ORDER BY created_at DESC");
+  res.json(rows);
+});
+
+// NEW: admin raffle entries (for backoffice list)
+app.get("/admin/raffle/entries", async (req, res) => {
+  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
+  const key = (req.query.key || "default_raffle").toString();
+  const { rows } = await pool.query(
+    `SELECT re.id,
+            re.external_id,
+            re.created_at,
+            u.membership_id,
+            u.first_name,
+            u.last_name,
+            u.tg_username,
+            u.submitted_username
+     FROM raffle_entries re
+     LEFT JOIN users u ON u.external_id = re.external_id
+     WHERE re.raffle_key = $1
+     ORDER BY re.id DESC`,
+    [key]
+  );
   res.json(rows);
 });
 
