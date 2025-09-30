@@ -10,7 +10,7 @@ if (!APP_URL) throw new Error("APP_URL is required");
 
 const TTL = Number(CACHE_TTL_MS || 60000);
 
-// HTTP client
+// HTTP client for API
 const httpClient = axios.create({
   baseURL: APP_URL,
   timeout: 2500,
@@ -46,29 +46,30 @@ async function getMessage(key){
   try{ return await fetchMessage(key);}catch{ return { content:"İçerik bulunamadı.", image_url:null }; }
 }
 
-// Görsel URL doğrulama (image/* beklenir)
-async function isImageUrl(url){
-  try{
-    const head = await axios.head(url, { timeout: 3000, maxRedirects: 5 });
-    const ct = String(head.headers["content-type"]||"").toLowerCase();
-    return ct.startsWith("image/");
-  }catch{
-    try{
-      const resp = await axios.get(url, { timeout: 3000, maxRedirects: 5, responseType: "stream" });
-      const ct = String(resp.headers["content-type"]||"").toLowerCase();
-      resp.data.destroy?.();
-      return ct.startsWith("image/");
-    }catch{ return false; }
+// URL'den resmi indirip dosya olarak gönder (URL problemi olan hostlar için)
+async function sendPhotoSafe(ctx, url, caption, extra){
+  try {
+    const resp = await axios.get(url, {
+      responseType: "arraybuffer",
+      timeout: 6000,
+      maxRedirects: 5,
+      headers: { "User-Agent": "TelegramBot/1.0" }
+    });
+    const buf = Buffer.from(resp.data);
+    const filename = (url.split("/").pop() || "image").split("?")[0] || "image";
+    return ctx.replyWithPhoto({ source: buf, filename }, { caption, ...extra });
+  } catch {
+    // Neden: URL indirilemezse metinle devam et
+    return ctx.reply(caption, extra);
   }
 }
 
 // Ortak gönderici
 async function sendMessageByKey(ctx, key, extraKb){
   const msg = await getMessage(key);
-  if (msg.image_url && await isImageUrl(msg.image_url)) {
-    return ctx.replyWithPhoto(msg.image_url, { caption: msg.content, ...extraKb });
+  if (msg.image_url) {
+    return sendPhotoSafe(ctx, msg.image_url, msg.content, extraKb);
   }
-  // Neden: URL image değilse sadece metin gönderilir
   return ctx.reply(msg.content, extraKb);
 }
 
@@ -166,4 +167,4 @@ bot.hears("Ücretsiz Etkinlikler ve Bonuslar", (ctx)=>sendMessageByKey(ctx,"memb
 bot.hears("Bana Özel Etkinlikler ve Fırsatlar", (ctx)=>sendMessageByKey(ctx,"member_personal_offers"));
 
 bot.launch();
-console.log("Bot: image URL content-type doğrulamalı gönderim aktif.");
+console.log("Bot: image fetch + upload yöntemi aktif.");
