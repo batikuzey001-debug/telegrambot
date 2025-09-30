@@ -1,363 +1,110 @@
-import express from "express";
-import pkg from "pg";
-import fetch from "node-fetch";
+"use client";
+import { useEffect, useMemo, useState } from "react";
 
-const { Pool } = pkg;
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false
-});
+type Row = {
+  id: number;
+  external_id: string;
+  name: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  membership_id: string | null;
+  status: "member" | "pending" | "guest";
+};
 
-const app = express();
-app.use(express.json());
+export default function UsersPage() {
+  const [rows, setRows] = useState<Row[]>([]);
+  const [q, setQ] = useState("");
+  const [msg, setMsg] = useState("");
+  const [notifyText, setNotifyText] = useState("");
+  const [target, setTarget] = useState<string>("");
 
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
-const BOT_INVALIDATE_URL = process.env.BOT_INVALIDATE_URL || "";
-const CACHE_SECRET = process.env.CACHE_SECRET || "";
-const BOT_WRITE_SECRET = process.env.BOT_WRITE_SECRET || "";
+  const load = async () => {
+    setMsg("Yükleniyor...");
+    const r = await fetch("/api/users", { cache: "no-store" });
+    const d = await r.json();
+    setRows(Array.isArray(d) ? d : []);
+    setMsg("");
+  };
 
-/* ---------------- DB INIT ---------------- */
-async function initDb() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      id BIGSERIAL PRIMARY KEY,
-      external_id TEXT UNIQUE NOT NULL,
-      name TEXT,
-      first_name TEXT,
-      last_name  TEXT,
-      membership_id TEXT,
-      preferences JSONB DEFAULT '{}'::jsonb,
-      bonus JSONB DEFAULT '{}'::jsonb,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  useEffect(() => { load(); }, []);
+
+  const filtered = useMemo(() => {
+    const s = q.toLowerCase();
+    return rows.filter(r =>
+      r.external_id.includes(q) ||
+      (r.first_name || "").toLowerCase().includes(s) ||
+      (r.last_name || "").toLowerCase().includes(s) ||
+      (r.membership_id || "").includes(q) ||
+      r.status.toLowerCase().includes(s)
     );
+  }, [rows, q]);
 
-    CREATE TABLE IF NOT EXISTS messages (
-      id BIGSERIAL PRIMARY KEY,
-      key TEXT UNIQUE NOT NULL,
-      content TEXT NOT NULL,
-      image_url TEXT,
-      active BOOLEAN NOT NULL DEFAULT TRUE,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-  `);
+  const badge = (st: Row["status"]) => {
+    const map: any = { member: "#16a34a", pending: "#f59e0b", guest: "#64748b" };
+    return <span style={{ padding: "2px 8px", borderRadius: 999, background: map[st], color: "#fff", fontSize: 12 }}>{st}</span>;
+  };
 
-  /* Eski kurulumlarda eksik kolonları ekle (idempotent) */
-  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS file_id TEXT;`);
-  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS image_url TEXT;`);
-  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;`);
-  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();`);
+  const sendNotify = async () => {
+    if (!target || !notifyText) return;
+    setMsg("Bildirim gönderiliyor...");
+    const r = await fetch("/api/admin/notify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ external_id: target, text: notifyText })
+    });
+    setMsg(r.ok ? "Bildirim gönderildi" : "Bildirim hatası");
+    setNotifyText("");
+    setTarget("");
+  };
 
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS audit_logs (
-      id BIGSERIAL PRIMARY KEY,
-      user_id BIGINT REFERENCES users(id),
-      action TEXT NOT NULL,
-      meta JSONB DEFAULT '{}'::jsonb,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
+  return (
+    <div>
+      <h1>Kullanıcılar</h1>
 
-    CREATE TABLE IF NOT EXISTS members (
-      membership_id TEXT PRIMARY KEY,
-      first_name TEXT NOT NULL,
-      last_name  TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-    CREATE INDEX IF NOT EXISTS idx_membership_id ON members (membership_id);
+      <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
+        <input
+          placeholder="Ara: ID, ad, soyad, üyelik, durum"
+          value={q}
+          onChange={e => setQ(e.target.value)}
+          style={{ width: 420 }}
+        />
+        <button onClick={load}>Yenile</button>
+        {msg && <span>{msg}</span>}
+      </div>
 
-    CREATE TABLE IF NOT EXISTS pending_verifications (
-      id BIGSERIAL PRIMARY KEY,
-      external_id TEXT NOT NULL,
-      provided_membership_id TEXT,
-      full_name TEXT,
-      status TEXT NOT NULL DEFAULT 'pending',
-      notes TEXT,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-    CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_verifications (status);
-    CREATE INDEX IF NOT EXISTS idx_pending_external ON pending_verifications (external_id);
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
+        <input placeholder="Telegram ID" value={target} onChange={e => setTarget(e.target.value)} />
+        <input placeholder="Mesaj" value={notifyText} onChange={e => setNotifyText(e.target.value)} style={{ width: 360 }} />
+        <button onClick={sendNotify} disabled={!target || !notifyText}>Bildirim Gönder</button>
+      </div>
 
-    CREATE TABLE IF NOT EXISTS raffles (
-      key TEXT PRIMARY KEY,
-      title TEXT NOT NULL,
-      active BOOLEAN NOT NULL DEFAULT TRUE,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-    CREATE TABLE IF NOT EXISTS raffle_entries (
-      id BIGSERIAL PRIMARY KEY,
-      raffle_key TEXT NOT NULL REFERENCES raffles(key) ON DELETE CASCADE,
-      external_id TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      UNIQUE (raffle_key, external_id)
-    );
-  `);
-
-  await pool.query(`
-    INSERT INTO messages (key, content) VALUES
-      ('welcome','Merhaba, hoş geldiniz!'),
-      ('not_member','Devam için resmi kanala katılın.'),
-      ('events','Güncel etkinlik bulunamadı.'),
-      ('guest_become_member','Kayıt bağlantısı yakında.'),
-      ('guest_benefits','Ayrıcalıklar listesi yakında.'),
-      ('member_update_account','Hesap güncelleme yakında.'),
-      ('member_free_events','Şu an ücretsiz etkinlik yok.'),
-      ('member_personal_offers','Yakında sunulacak.'),
-      ('raffle_joined','Çekilişe katılımınız alındı. Bol şans!'),
-      ('raffle_already','Zaten bu çekilişe katılmışsınız.')
-    ON CONFLICT (key) DO NOTHING;
-
-    INSERT INTO raffles (key, title, active)
-    VALUES ('default_raffle','Genel Çekiliş', true)
-    ON CONFLICT (key) DO NOTHING;
-  `);
+      <table border={1} cellPadding={6} style={{ borderCollapse: "collapse", width: "100%" }}>
+        <thead>
+          <tr>
+            <th>Kullanıcı ID</th>
+            <th>Telegram ID</th>
+            <th>İsim</th>
+            <th>Soyisim</th>
+            <th>Üyelik ID</th>
+            <th>Durum</th>
+          </tr>
+        </thead>
+        <tbody>
+          {filtered.map(r => (
+            <tr key={r.id}>
+              <td>{r.id}</td>
+              <td>{r.external_id}</td>
+              <td>{r.first_name || "-"}</td>
+              <td>{r.last_name || "-"}</td>
+              <td>{r.membership_id || "-"}</td>
+              <td>{badge(r.status)}</td>
+            </tr>
+          ))}
+          {!filtered.length && (
+            <tr><td colSpan={6} style={{ textAlign: "center", color: "#666" }}>Kayıt yok</td></tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
 }
-
-app.get("/", (_req, res) => res.json({ ok: true }));
-
-/* ---------------- MESSAGES ---------------- */
-app.get("/messages/:key", async (req, res) => {
-  const { rows } = await pool.query(
-    "SELECT content, image_url, file_id FROM messages WHERE key=$1 AND active=true LIMIT 1",
-    [req.params.key]
-  );
-  if (!rows.length) return res.status(404).json({ error: "not_found" });
-  res.json(rows[0]);
-});
-
-app.get("/admin/messages", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
-  const { rows } = await pool.query(
-    "SELECT key, content, image_url, file_id, updated_at FROM messages WHERE active=true ORDER BY key ASC"
-  );
-  res.json(rows);
-});
-
-app.put("/admin/messages/:key", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
-  const { content, image_url } = req.body || {};
-  if (!content && !image_url) return res.status(400).json({ error: "no_changes" });
-  const q = `
-    INSERT INTO messages (key, content, image_url, active)
-    VALUES ($1, COALESCE($2,''), $3, true)
-    ON CONFLICT (key) DO UPDATE SET
-      content   = COALESCE($2, messages.content),
-      image_url = COALESCE($3, messages.image_url),
-      file_id   = CASE WHEN $3 IS NOT NULL AND $3 <> messages.image_url THEN NULL ELSE messages.file_id END,
-      updated_at= now()
-    RETURNING key, content, image_url, file_id, updated_at
-  `;
-  const { rows } = await pool.query(q, [req.params.key, content || null, image_url || null]);
-  if (BOT_INVALIDATE_URL && CACHE_SECRET) {
-    try {
-      await fetch(BOT_INVALIDATE_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-cache-secret": CACHE_SECRET },
-        body: JSON.stringify({ key: req.params.key })
-      });
-    } catch {}
-  }
-  res.json(rows[0]);
-});
-
-app.put("/bot/messages/:key/file-id", async (req, res) => {
-  if ((req.headers["x-bot-secret"] || "") !== BOT_WRITE_SECRET) return res.status(401).json({ error: "unauthorized" });
-  const { file_id } = req.body || {};
-  if (!file_id) return res.status(400).json({ error: "file_id_required" });
-  const { rows } = await pool.query(
-    "UPDATE messages SET file_id=$1, updated_at=now() WHERE key=$2 RETURNING key, file_id",
-    [file_id, req.params.key]
-  );
-  if (!rows.length) return res.status(404).json({ error: "not_found" });
-  res.json(rows[0]);
-});
-
-/* ---------------- USERS ---------------- */
-app.post("/users", async (req, res) => {
-  const { external_id, name, first_name, last_name, membership_id } = req.body || {};
-  if (!external_id) return res.status(400).json({ error: "external_id required" });
-  const q = `
-    INSERT INTO users (external_id, name, first_name, last_name, membership_id)
-    VALUES ($1,$2,$3,$4,$5)
-    ON CONFLICT (external_id) DO UPDATE SET
-      name=EXCLUDED.name,
-      first_name=COALESCE(EXCLUDED.first_name, users.first_name),
-      last_name =COALESCE(EXCLUDED.last_name,  users.last_name),
-      membership_id=COALESCE(EXCLUDED.membership_id, users.membership_id),
-      updated_at=now()
-    RETURNING id, external_id, name, first_name, last_name, membership_id
-  `;
-  const { rows } = await pool.query(q, [external_id, name || null, first_name || null, last_name || null, membership_id || null]);
-  res.json(rows[0]);
-});
-
-app.get("/users", async (_req, res) => {
-  const { rows } = await pool.query(
-    "SELECT id, external_id, name, first_name, last_name, membership_id FROM users ORDER BY id DESC LIMIT 500"
-  );
-  res.json(rows);
-});
-
-/* ---------------- MEMBERS & PENDING ---------------- */
-app.get("/members/:membership_id", async (req, res) => {
-  const { rows } = await pool.query(
-    "SELECT membership_id, first_name, last_name FROM members WHERE membership_id=$1 LIMIT 1",
-    [req.params.membership_id]
-  );
-  if (!rows.length) return res.json({ found: false });
-  const m = rows[0];
-  res.json({ found: true, membership_id: m.membership_id, first_name: m.first_name, last_name: m.last_name });
-});
-
-app.post("/admin/members/import", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
-  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
-  if (!rows.length) return res.status(400).json({ error: "empty" });
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    for (const r of rows) {
-      if (!r.membership_id || !r.first_name || !r.last_name) continue;
-      await client.query(
-        `INSERT INTO members (membership_id, first_name, last_name)
-         VALUES ($1,$2,$3)
-         ON CONFLICT (membership_id) DO UPDATE SET
-           first_name=EXCLUDED.first_name,
-           last_name=EXCLUDED.last_name,
-           updated_at=now()`,
-        [String(r.membership_id), String(r.first_name), String(r.last_name)]
-      );
-    }
-    await client.query("COMMIT");
-    res.json({ ok: true, count: rows.length });
-  } catch {
-    await client.query("ROLLBACK");
-    res.status(500).json({ error: "import_failed" });
-  } finally {
-    client.release();
-  }
-});
-
-app.post("/pending-requests", async (req, res) => {
-  const { external_id, provided_membership_id, full_name, notes } = req.body || {};
-  if (!external_id || !full_name) return res.status(400).json({ error: "external_id_and_full_name_required" });
-  const { rows } = await pool.query(
-    `INSERT INTO pending_verifications (external_id, provided_membership_id, full_name, notes)
-     VALUES ($1,$2,$3,$4) RETURNING id, status`,
-    [String(external_id), provided_membership_id || null, String(full_name), notes || null]
-  );
-  res.json(rows[0]);
-});
-
-app.get("/admin/pending-requests", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
-  const status = (req.query.status || "pending").toString();
-  const { rows } = await pool.query(
-    "SELECT id, external_id, provided_membership_id, full_name, status, notes, created_at FROM pending_verifications WHERE status=$1 ORDER BY id DESC",
-    [status]
-  );
-  res.json(rows);
-});
-
-app.put("/admin/pending-requests/:id", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
-  const { action, membership_id, notes } = req.body || {};
-  if (!["approve", "reject"].includes(action)) return res.status(400).json({ error: "invalid_action" });
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const { rows: cur } = await client.query("SELECT * FROM pending_verifications WHERE id=$1 FOR UPDATE", [req.params.id]);
-    if (!cur.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "not_found" }); }
-
-    if (action === "approve") {
-      if (!membership_id) { await client.query("ROLLBACK"); return res.status(400).json({ error: "membership_id_required" }); }
-      await client.query(
-        "UPDATE pending_verifications SET status='approved', notes=$2, updated_at=now() WHERE id=$1",
-        [req.params.id, notes || null]
-      );
-    } else {
-      await client.query(
-        "UPDATE pending_verifications SET status='rejected', notes=$2, updated_at=now() WHERE id=$1",
-        [req.params.id, notes || null]
-      );
-    }
-    await client.query("COMMIT");
-    res.json({ ok: true });
-  } catch {
-    await client.query("ROLLBACK");
-    res.status(500).json({ error: "update_failed" });
-  } finally {
-    client.release();
-  }
-});
-
-app.put("/admin/users/link", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
-  const { external_id, membership_id } = req.body || {};
-  if (!external_id || !membership_id) return res.status(400).json({ error: "required" });
-  const { rows: mem } = await pool.query("SELECT first_name, last_name FROM members WHERE membership_id=$1", [membership_id]);
-  const fn = mem[0]?.first_name || null;
-  const ln = mem[0]?.last_name || null;
-  const { rows } = await pool.query(
-    `INSERT INTO users (external_id, membership_id, first_name, last_name)
-     VALUES ($1,$2,$3,$4)
-     ON CONFLICT (external_id) DO UPDATE SET
-       membership_id=EXCLUDED.membership_id,
-       first_name=COALESCE(EXCLUDED.first_name, users.first_name),
-       last_name =COALESCE(EXCLUDED.last_name, users.last_name),
-       updated_at=now()
-     RETURNING id, external_id, membership_id, first_name, last_name`,
-    [String(external_id), String(membership_id), fn, ln]
-  );
-  res.json(rows[0]);
-});
-
-/* ---------------- RAFFLES ---------------- */
-app.post("/raffle/enter", async (req, res) => {
-  const { external_id, raffle_key } = req.body || {};
-  const key = (raffle_key || "default_raffle").toString();
-  if (!external_id) return res.status(400).json({ error: "external_id_required" });
-  const { rows: r } = await pool.query("SELECT key FROM raffles WHERE key=$1 AND active=true", [key]);
-  if (!r.length) return res.status(400).json({ error: "raffle_inactive" });
-  try {
-    await pool.query("INSERT INTO raffle_entries (raffle_key, external_id) VALUES ($1,$2)", [key, String(external_id)]);
-    return res.json({ joined: true });
-  } catch {
-    return res.json({ joined: false, reason: "already" });
-  }
-});
-
-app.get("/raffles/active", async (_req, res) => {
-  const { rows } = await pool.query("SELECT key, title FROM raffles WHERE active=true ORDER BY created_at DESC");
-  res.json(rows);
-});
-
-app.post("/admin/raffles", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
-  const { key, title, active } = req.body || {};
-  if (!key || !title) return res.status(400).json({ error: "required" });
-  const { rows } = await pool.query(
-    "INSERT INTO raffles (key, title, active) VALUES ($1,$2,COALESCE($3,true)) ON CONFLICT (key) DO NOTHING RETURNING key, title, active",
-    [String(key), String(title), active ?? true]
-  );
-  if (!rows.length) return res.status(409).json({ error: "exists" });
-  res.json(rows[0]);
-});
-
-app.put("/admin/raffles/:key", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
-  const { title, active } = req.body || {};
-  const { rows } = await pool.query(
-    "UPDATE raffles SET title=COALESCE($2,title), active=COALESCE($3,active) WHERE key=$1 RETURNING key, title, active",
-    [req.params.key, title || null, typeof active === "boolean" ? active : null]
-  );
-  if (!rows.length) return res.status(404).json({ error: "not_found" });
-  res.json(rows[0]);
-});
-
-const port = process.env.PORT || 3000;
-initDb()
-  .then(() => app.listen(port, () => console.log(`API on :${port}`)))
-  .catch((e) => { console.error("DB init error", e); process.exit(1); });
