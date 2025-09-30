@@ -12,8 +12,8 @@ const pool = new Pool({
 const app = express();
 app.use(express.json());
 
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";              // Backoffice çağrıları için basit koruma
-const BOT_INVALIDATE_URL = process.env.BOT_INVALIDATE_URL || ""; // ör: https://<bot>.up.railway.app/invalidate
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
+const BOT_INVALIDATE_URL = process.env.BOT_INVALIDATE_URL || "";
 const CACHE_SECRET = process.env.CACHE_SECRET || "";
 
 async function initDb() {
@@ -38,16 +38,6 @@ async function initDb() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
 
-    CREATE TABLE IF NOT EXISTS menu_options (
-      id BIGSERIAL PRIMARY KEY,
-      title TEXT NOT NULL,
-      action TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'guest',
-      order_index INT NOT NULL DEFAULT 0,
-      active BOOLEAN NOT NULL DEFAULT TRUE,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-
     CREATE TABLE IF NOT EXISTS audit_logs (
       id BIGSERIAL PRIMARY KEY,
       user_id BIGINT REFERENCES users(id),
@@ -61,22 +51,12 @@ async function initDb() {
       ('not_member', 'Devam için resmi kanala katılın.'),
       ('events', 'Güncel etkinlik bulunamadı.')
     ON CONFLICT (key) DO NOTHING;
-
-    INSERT INTO menu_options (title, action, role, order_index) VALUES
-      ('Hesap Bilgilerimi Güncelle', 'update_account', 'member', 1),
-      ('Ücretsiz Etkinlikler ve Bonuslar', 'free_events', 'member', 2),
-      ('Bana Özel Etkinlikler ve Fırsatlar', 'personal_offers', 'member', 3),
-
-      ('RadissonBet üyesi olmak istiyorum', 'become_member', 'guest', 1),
-      ('RadissonBet ayrıcalıkları', 'benefits', 'guest', 2),
-      ('Etkinlikler ve fırsatlar', 'public_events', 'guest', 3)
-    ON CONFLICT DO NOTHING;
   `);
 }
 
 app.get("/", (_req, res) => res.json({ ok: true }));
 
-// Mesaj oku (metin + görsel)
+// Messages
 app.get("/messages/:key", async (req, res) => {
   const { rows } = await pool.query(
     "SELECT content, image_url FROM messages WHERE key = $1 AND active = true LIMIT 1",
@@ -86,7 +66,7 @@ app.get("/messages/:key", async (req, res) => {
   res.json(rows[0]);
 });
 
-// Admin: mesaj güncelle (content/image_url). Basit token kontrolü.
+// Admin update message
 app.put("/admin/messages/:key", async (req, res) => {
   if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) {
     return res.status(401).json({ error: "unauthorized" });
@@ -105,7 +85,7 @@ app.put("/admin/messages/:key", async (req, res) => {
   `;
   const { rows } = await pool.query(q, [req.params.key, content || null, image_url || null]);
 
-  // Bot cache invalidate
+  // Invalidate bot cache
   if (BOT_INVALIDATE_URL && CACHE_SECRET) {
     try {
       await fetch(BOT_INVALIDATE_URL, {
@@ -113,9 +93,7 @@ app.put("/admin/messages/:key", async (req, res) => {
         headers: { "Content-Type": "application/json", "x-cache-secret": CACHE_SECRET },
         body: JSON.stringify({ key: req.params.key })
       });
-    } catch (e) {
-      // Neden: Bot anlık erişilemeyebilir; içerik yine TTL ile güncellenecek.
-    }
+    } catch {}
   }
 
   res.json(rows[0]);
@@ -139,10 +117,15 @@ app.post("/users", async (req, res) => {
   res.json(rows[0]);
 });
 
-const port = process.env.PORT || 3000;
-initDb().then(() => {
-  app.listen(port, () => console.log(`API on :${port}`));
-}).catch((e) => {
-  console.error("DB init error", e);
-  process.exit(1);
+// Users list
+app.get("/users", async (_req, res) => {
+  const { rows } = await pool.query(
+    "SELECT id, external_id, name, membership_id FROM users ORDER BY id DESC LIMIT 500"
+  );
+  res.json(rows);
 });
+
+const port = process.env.PORT || 3000;
+initDb()
+  .then(() => app.listen(port, () => console.log(`API on :${port}`)))
+  .catch((e) => { console.error("DB init error", e); process.exit(1); });
