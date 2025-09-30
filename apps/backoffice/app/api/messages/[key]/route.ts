@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import jwt from "jsonwebtoken";
 
 const api = process.env.API_BASE!;
@@ -12,8 +13,8 @@ export async function GET(_: Request, { params }: { params: { key: string } }) {
 }
 
 export async function PUT(req: Request, { params }: { params: { key: string } }) {
-  const token = (await import("next/headers")).cookies().get(COOKIE)?.value;
-  try { jwt.verify(token || "", process.env.JWT_SECRET!); } catch { return NextResponse.json({ error: "unauthorized" }, { status: 401 }); }
+  const token = cookies().get(COOKIE)?.value || "";
+  try { jwt.verify(token, process.env.JWT_SECRET!); } catch { return NextResponse.json({ error: "unauthorized" }, { status: 401 }); }
   const body = await req.json();
   const r = await fetch(`${api}/admin/messages/${params.key}`, {
     method: "PUT",
