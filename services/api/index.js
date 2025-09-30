@@ -92,6 +92,18 @@ async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       UNIQUE (raffle_key, external_id)
     );
+
+    -- Bildirim şablonları (planlı gönderim için)
+    CREATE TABLE IF NOT EXISTS notification_templates (
+      id BIGSERIAL PRIMARY KEY,
+      key TEXT UNIQUE NOT NULL,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      image_url TEXT,
+      buttons JSONB DEFAULT '[]'::jsonb,  -- [{text, url}] opsiyonel
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
   `);
 
   await pool.query(`
@@ -111,7 +123,7 @@ async function initDb() {
     INSERT INTO raffles (key, title, active)
     VALUES ('default_raffle','Genel Çekiliş', true)
     ON CONFLICT (key) DO NOTHING;
-  `;
+  `);
 }
 
 app.get("/", (_req, res) => res.json({ ok: true }));
@@ -192,7 +204,7 @@ app.post("/users", async (req, res) => {
   res.json(rows[0]);
 });
 
-// LIST: status = member | pending | guest
+// LIST: status
 app.get("/users", async (_req, res) => {
   const q = `
     SELECT
@@ -279,7 +291,6 @@ app.get("/admin/pending-requests", async (req, res) => {
   res.json(rows);
 });
 
-// Onay/ret: membership_id zorunlu değil, external_id döner (tek tık onay + bildirim için)
 app.put("/admin/pending-requests/:id", async (req, res) => {
   if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
   const { action, notes } = req.body || {};
@@ -293,7 +304,6 @@ app.put("/admin/pending-requests/:id", async (req, res) => {
     const pending = cur[0];
 
     if (action === "approve") {
-      // provided_membership_id varsa üyeyle otomatik eşle
       if (pending.provided_membership_id) {
         const { rows: mem } = await client.query(
           "SELECT first_name, last_name FROM members WHERE membership_id=$1",
@@ -312,7 +322,6 @@ app.put("/admin/pending-requests/:id", async (req, res) => {
           [pending.external_id, fn, ln, pending.provided_membership_id]
         );
       } else {
-        // yoksa kullanıcı kaydını garanti altına al
         await client.query(
           `INSERT INTO users (external_id)
            VALUES ($1) ON CONFLICT (external_id) DO NOTHING`,
@@ -403,6 +412,79 @@ app.put("/admin/raffles/:key", async (req, res) => {
   );
   if (!rows.length) return res.status(404).json({ error: "not_found" });
   res.json(rows[0]);
+});
+
+/* ---------------- NOTIFICATION TEMPLATES (admin) ---------------- */
+function auth(req, res) {
+  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) {
+    res.status(401).json({ error: "unauthorized" });
+    return false;
+  }
+  return true;
+}
+
+// Liste
+app.get("/admin/notifications/templates", async (req, res) => {
+  if (!auth(req, res)) return;
+  const { rows } = await pool.query(
+    "SELECT key, title, content, image_url, buttons, active, updated_at FROM notification_templates ORDER BY updated_at DESC"
+  );
+  res.json(rows);
+});
+
+// Tek kayıt
+app.get("/admin/notifications/templates/:key", async (req, res) => {
+  if (!auth(req, res)) return;
+  const { rows } = await pool.query(
+    "SELECT key, title, content, image_url, buttons, active, updated_at FROM notification_templates WHERE key=$1 LIMIT 1",
+    [req.params.key]
+  );
+  if (!rows.length) return res.status(404).json({ error: "not_found" });
+  res.json(rows[0]);
+});
+
+// Oluştur
+app.post("/admin/notifications/templates", async (req, res) => {
+  if (!auth(req, res)) return;
+  const { key, title, content, image_url, buttons, active } = req.body || {};
+  if (!key || !title || !content) return res.status(400).json({ error: "required" });
+  const { rows } = await pool.query(
+    `INSERT INTO notification_templates (key, title, content, image_url, buttons, active)
+     VALUES ($1,$2,$3,$4,COALESCE($5,'[]'::jsonb),COALESCE($6,true))
+     ON CONFLICT (key) DO NOTHING
+     RETURNING key, title, content, image_url, buttons, active, updated_at`,
+    [String(key), String(title), String(content), image_url || null, buttons || null, active ?? true]
+  );
+  if (!rows.length) return res.status(409).json({ error: "exists" });
+  res.json(rows[0]);
+});
+
+// Güncelle
+app.put("/admin/notifications/templates/:key", async (req, res) => {
+  if (!auth(req, res)) return;
+  const { title, content, image_url, buttons, active } = req.body || {};
+  const { rows } = await pool.query(
+    `UPDATE notification_templates
+     SET title=COALESCE($2,title),
+         content=COALESCE($3,content),
+         image_url=$4,
+         buttons=COALESCE($5,buttons),
+         active=COALESCE($6,active),
+         updated_at=now()
+     WHERE key=$1
+     RETURNING key, title, content, image_url, buttons, active, updated_at`,
+    [req.params.key, title || null, content || null, image_url || null, buttons || null, typeof active === "boolean" ? active : null]
+  );
+  if (!rows.length) return res.status(404).json({ error: "not_found" });
+  res.json(rows[0]);
+});
+
+// Sil
+app.delete("/admin/notifications/templates/:key", async (req, res) => {
+  if (!auth(req, res)) return;
+  const { rowCount } = await pool.query("DELETE FROM notification_templates WHERE key=$1", [req.params.key]);
+  if (!rowCount) return res.status(404).json({ error: "not_found" });
+  res.json({ ok: true });
 });
 
 const port = process.env.PORT || 3000;
