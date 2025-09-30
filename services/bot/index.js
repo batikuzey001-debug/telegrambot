@@ -1,17 +1,15 @@
 import { Telegraf, Markup } from "telegraf";
-import LocalSession from "telegraf-session-local";
 import axios from "axios";
 
 const { BOT_TOKEN, CHANNEL_USERNAME, APP_URL } = process.env;
 if (!BOT_TOKEN) throw new Error("BOT_TOKEN is required");
 if (!CHANNEL_USERNAME) throw new Error("CHANNEL_USERNAME is required");
-if (!APP_URL) throw new Error("APP_URL is required"); // Örn: https://api-service-url.up.railway.app
+if (!APP_URL) throw new Error("APP_URL is required");
+
+// Basit bellek içi durum
+const state = new Map(); // key: userId, value: { membershipId?: string, awaiting?: boolean }
 
 const bot = new Telegraf(BOT_TOKEN);
-bot.use(new LocalSession({ database: "session_db.json" }).middleware());
-
-// Session middleware (dosyaya kaydeder, Railway’de ephemeral disk; yine de çalışır)
-bot.use(new LocalSession({ database: "session_db.json" }).middleware());
 
 const joinKeyboard = Markup.inlineKeyboard([
   Markup.button.url("Kanala Katıl", `https://t.me/${CHANNEL_USERNAME.replace("@", "")}`),
@@ -34,8 +32,7 @@ const guestMenu = Markup.keyboard([
 
 async function isChannelMember(ctx) {
   try {
-    const { id } = ctx.from;
-    const member = await ctx.telegram.getChatMember(CHANNEL_USERNAME, id);
+    const member = await ctx.telegram.getChatMember(CHANNEL_USERNAME, ctx.from.id);
     return ["creator", "administrator", "member"].includes(member.status);
   } catch {
     return false;
@@ -45,16 +42,22 @@ async function isChannelMember(ctx) {
 async function gateOrProceed(ctx) {
   const ok = await isChannelMember(ctx);
   if (!ok) {
-    await ctx.reply("Devam edebilmek için resmi kanala katılın.", joinKeyboard);
+    await ctx.reply("Devam için resmi kanala katılın.", joinKeyboard);
     return false;
   }
   return true;
 }
 
+function getUserState(userId) {
+  if (!state.has(userId)) state.set(userId, {});
+  return state.get(userId);
+}
+
 bot.start(async (ctx) => {
   const ok = await gateOrProceed(ctx);
   if (!ok) return;
-  if (ctx.session.membershipId) {
+  const s = getUserState(ctx.from.id);
+  if (s.membershipId) {
     await ctx.reply("Hoş geldiniz. Üyelik menüsü:", memberMenu);
   } else {
     await ctx.reply("Lütfen bir seçenek seçin:", roleMenu);
@@ -64,7 +67,8 @@ bot.start(async (ctx) => {
 bot.hears(["Merhaba", "merhaba", "Start", "start"], async (ctx) => {
   const ok = await gateOrProceed(ctx);
   if (!ok) return;
-  if (ctx.session.membershipId) {
+  const s = getUserState(ctx.from.id);
+  if (s.membershipId) {
     await ctx.reply("Hoş geldiniz. Üyelik menüsü:", memberMenu);
   } else {
     await ctx.reply("Lütfen bir seçenek seçin:", roleMenu);
@@ -79,10 +83,12 @@ bot.action("verify_join", async (ctx) => {
   await ctx.reply("Lütfen bir seçenek seçin:", roleMenu);
 });
 
+// Rol seçimi
 bot.hears("RadissonBet Üyesiyim", async (ctx) => {
   const ok = await gateOrProceed(ctx);
   if (!ok) return;
-  ctx.session.awaitingMembershipId = true;
+  const s = getUserState(ctx.from.id);
+  s.awaiting = true; // sadece sıradaki mesaj için bekleme
   await ctx.reply("Üyelik ID’nizi yazın:");
 });
 
@@ -92,15 +98,29 @@ bot.hears("Misafirim", async (ctx) => {
   await ctx.reply("Misafir menüsü:", guestMenu);
 });
 
+// Üyelik ID yakalama
 bot.on("text", async (ctx) => {
-  if (ctx.session.awaitingMembershipId) {
-    const idText = ctx.message.text?.trim();
-    if (idText) {
-      ctx.session.membershipId = idText;
-      ctx.session.awaitingMembershipId = false;
-      await ctx.reply("Üyelik ID’niz kaydedildi. Üyelik menüsü:", memberMenu);
-    }
+  const s = getUserState(ctx.from.id);
+  if (!s.awaiting) return;
+
+  const idText = ctx.message.text?.trim();
+  if (!idText) return;
+
+  s.membershipId = idText;
+  s.awaiting = false;
+
+  // Kalıcı kayıt
+  try {
+    await axios.post(`${APP_URL}/users`, {
+      external_id: String(ctx.from.id),
+      name: ctx.from.username || ctx.from.first_name || null,
+      membership_id: idText
+    });
+  } catch (err) {
+    console.error("API user save error:", err.message);
   }
+
+  await ctx.reply("Üyelik ID’niz kaydedildi. Üyelik menüsü:", memberMenu);
 });
 
 // Üye menüsü (dummy)
@@ -126,26 +146,4 @@ bot.hears("Etkinlikler ve fırsatlar", (ctx) =>
 );
 
 bot.launch();
-console.log("Bot with channel-gate and role menus running.");
-bot.on("text", async (ctx) => {
-  if (ctx.session.awaitingMembershipId) {
-    const idText = ctx.message.text?.trim();
-    if (idText) {
-      ctx.session.membershipId = idText;
-      ctx.session.awaitingMembershipId = false;
-
-      // API’ye kaydet
-      try {
-        await axios.post(`${APP_URL}/users`, {
-          external_id: String(ctx.from.id),
-          name: ctx.from.username || ctx.from.first_name,
-          membership_id: idText
-        });
-      } catch (err) {
-        console.error("API user save error:", err.message);
-      }
-
-      await ctx.reply("Üyelik ID’niz kaydedildi. Üyelik menüsü:", memberMenu);
-    }
-  }
-});
+console.log("Bot running without session middleware.");
