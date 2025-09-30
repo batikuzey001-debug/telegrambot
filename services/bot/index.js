@@ -19,14 +19,14 @@ const api = axios.create({
 
 const bot = new Telegraf(BOT_TOKEN);
 
-// Sabit menüler + navigasyon
+// Sabit menüler + navigasyon + çekiliş
 const backRow = ["Geri", "Ana Menü"];
-const roleMenu = Markup.keyboard([["RadissonBet Üyesiyim"], ["Misafirim"], backRow]).resize();
+const roleMenu = Markup.keyboard([["RadissonBet Üyesiyim"], ["Misafirim"], ["Çekilişe Katıl"], backRow]).resize();
 const memberMenu = Markup.keyboard(
-  [["Hesap Bilgilerimi Güncelle"], ["Ücretsiz Etkinlikler ve Bonuslar"], ["Bana Özel Etkinlikler ve Fırsatlar"], backRow]
+  [["Hesap Bilgilerimi Güncelle"], ["Ücretsiz Etkinlikler ve Bonuslar"], ["Bana Özel Etkinlikler ve Fırsatlar"], ["Çekilişe Katıl"], backRow]
 ).resize();
 const guestMenu = Markup.keyboard(
-  [["RadissonBet üyesi olmak istiyorum"], ["RadissonBet ayrıcalıkları"], ["Etkinlikler ve fırsatlar"], backRow]
+  [["RadissonBet üyesi olmak istiyorum"], ["RadissonBet ayrıcalıkları"], ["Etkinlikler ve fırsatlar"], ["Çekilişe Katıl"], backRow]
 ).resize();
 
 const state = new Map();
@@ -39,21 +39,16 @@ async function getMessage(key){ const c=getCached(key); if(c){ fetchMessage(key)
 async function sendMessageByKey(ctx, key, extraKb){
   const msg = await getMessage(key);
   const textPromise = ctx.reply(msg.content, extraKb).catch(()=>{});
-  if (msg.file_id) {
-    setImmediate(async()=>{ try{ await ctx.replyWithPhoto(msg.file_id, { caption: msg.content }); }catch{}});
-  } else if (msg.image_url) {
-    setImmediate(async()=>{
-      try{
-        const resp = await axios.get(msg.image_url,{responseType:"arraybuffer",timeout:4000,maxRedirects:4});
-        const sent = await ctx.replyWithPhoto({source:Buffer.from(resp.data),filename:"image"}, { caption: msg.content });
-        if (sent?.photo?.length && BOT_WRITE_SECRET) {
-          const fid = sent.photo[sent.photo.length - 1].file_id;
-          await api.put(`/bot/messages/${key}/file-id`, { file_id: fid }, { headers: { "x-bot-secret": BOT_WRITE_SECRET } });
-          setCached(key,{...msg,file_id:fid});
-        }
-      }catch{}
-    });
-  }
+  if (msg.file_id) setImmediate(async()=>{ try{ await ctx.replyWithPhoto(msg.file_id, { caption: msg.content }); }catch{} });
+  else if (msg.image_url) setImmediate(async()=>{ try{
+    const resp = await axios.get(msg.image_url,{responseType:"arraybuffer",timeout:4000,maxRedirects:4});
+    const sent = await ctx.replyWithPhoto({source:Buffer.from(resp.data),filename:"image"},{caption:msg.content});
+    if (sent?.photo?.length && BOT_WRITE_SECRET) {
+      const fid = sent.photo[sent.photo.length - 1].file_id;
+      await api.put(`/bot/messages/${key}/file-id`, { file_id: fid }, { headers: { "x-bot-secret": BOT_WRITE_SECRET } });
+      setCached(key,{...msg,file_id:fid});
+    }
+  }catch{} });
   return textPromise;
 }
 
@@ -77,40 +72,16 @@ async function welcomeAndGuide(ctx){
   return true;
 }
 
-// Start
-bot.start(async (ctx)=>{
-  const ok = await welcomeAndGuide(ctx);
-  if(!ok) return;
-  const s=getUserState(ctx.from.id);
-  if (s.membershipId) await ctx.reply("Üyelik menüsü:", memberMenu);
-  else await ctx.reply("Lütfen bir seçenek seçin:", roleMenu);
-});
-
-// Selam
-bot.hears(["Merhaba","merhaba","Start","start"], async (ctx)=>{
-  const ok = await welcomeAndGuide(ctx);
-  if(!ok) return;
-  const s=getUserState(ctx.from.id);
-  await ctx.reply("Menü:", s.membershipId?memberMenu:guestMenu);
-});
+// Start / Selam
+bot.start(async (ctx)=>{ const ok = await welcomeAndGuide(ctx); if(!ok) return; const s=getUserState(ctx.from.id); if (s.membershipId) await ctx.reply("Üyelik menüsü:", memberMenu); else await ctx.reply("Lütfen bir seçenek seçin:", roleMenu); });
+bot.hears(["Merhaba","merhaba","Start","start"], async (ctx)=>{ const ok = await welcomeAndGuide(ctx); if(!ok) return; const s=getUserState(ctx.from.id); await ctx.reply("Menü:", s.membershipId?memberMenu:guestMenu); });
 
 // Kanal kontrol butonu
-bot.action("verify_join", async (ctx)=>{
-  const ok = await isChannelMember(ctx);
-  await ctx.answerCbQuery(ok?"Üyelik doğrulandı":"Hâlâ üye görünmüyor");
-  if(!ok) return;
-  await ctx.editMessageText("Teşekkürler. Devam edebilirsiniz.");
-  const s=getUserState(ctx.from.id);
-  if (s.membershipId) await ctx.reply("Üyelik menüsü:", memberMenu);
-  else await ctx.reply("Lütfen bir seçenek seçin:", roleMenu);
-});
+bot.action("verify_join", async (ctx)=>{ const ok = await isChannelMember(ctx); await ctx.answerCbQuery(ok?"Üyelik doğrulandı":"Hâlâ üye görünmüyor"); if(!ok) return; await ctx.editMessageText("Teşekkürler. Devam edebilirsiniz."); const s=getUserState(ctx.from.id); if (s.membershipId) await ctx.reply("Üyelik menüsü:", memberMenu); else await ctx.reply("Lütfen bir seçenek seçin:", roleMenu); });
 
 // Navigasyon
 bot.hears("Ana Menü", async (ctx)=> ctx.reply("Ana menü:", roleMenu));
-bot.hears("Geri", async (ctx)=>{
-  const s=getUserState(ctx.from.id);
-  return ctx.reply("Menü:", s.membershipId?memberMenu:guestMenu);
-});
+bot.hears("Geri", async (ctx)=>{ const s=getUserState(ctx.from.id); return ctx.reply("Menü:", s.membershipId?memberMenu:guestMenu); });
 
 /* Üyelik akışı */
 bot.hears("RadissonBet Üyesiyim", async (ctx)=>{
@@ -166,22 +137,33 @@ bot.hears("Misafirim", async (ctx)=>{
   await ctx.reply("Misafir menüsü:", guestMenu);
 });
 bot.hears("RadissonBet üyesi olmak istiyorum", async (ctx)=>{
-  const kb = Markup.inlineKeyboard([
-    ...(SIGNUP_URL ? [Markup.button.url("Kayıt Ol", SIGNUP_URL)] : [])
-  ]);
+  const kb = Markup.inlineKeyboard([...(SIGNUP_URL ? [Markup.button.url("Kayıt Ol", SIGNUP_URL)] : [])]);
   await sendMessageByKey(ctx,"guest_become_member", SIGNUP_URL ? { reply_markup: kb.reply_markup } : undefined);
 });
 bot.hears("RadissonBet ayrıcalıkları", async (ctx)=>{
-  const kb = Markup.inlineKeyboard([
-    ...(SOCIAL_URL ? [Markup.button.url("Radisson Sosyal", SOCIAL_URL)] : [])
-  ]);
+  const kb = Markup.inlineKeyboard([...(SOCIAL_URL ? [Markup.button.url("Radisson Sosyal", SOCIAL_URL)] : [])]);
   await sendMessageByKey(ctx,"guest_benefits", SOCIAL_URL ? { reply_markup: kb.reply_markup } : undefined);
 });
 bot.hears("Etkinlikler ve fırsatlar", (ctx)=>sendMessageByKey(ctx,"events"));
+
+/* Çekiliş katılım */
+bot.hears("Çekilişe Katıl", async (ctx)=>{
+  try{
+    const { data } = await api.post("/raffle/enter", {
+      external_id: String(ctx.from.id),
+      raffle_key: "default_raffle"
+    });
+    if (data.joined) return sendMessageByKey(ctx,"raffle_joined");
+    if (data.reason === "already") return sendMessageByKey(ctx,"raffle_already");
+    return ctx.reply("Çekiliş şu anda aktif değil.");
+  }catch{
+    return ctx.reply("Çekiliş kaydı yapılamadı. Lütfen tekrar deneyin.");
+  }
+});
 
 bot.hears("Hesap Bilgilerimi Güncelle", (ctx)=>sendMessageByKey(ctx,"member_update_account"));
 bot.hears("Ücretsiz Etkinlikler ve Bonuslar", (ctx)=>sendMessageByKey(ctx,"member_free_events"));
 bot.hears("Bana Özel Etkinlikler ve Fırsatlar", (ctx)=>sendMessageByKey(ctx,"member_personal_offers"));
 
 bot.launch({ dropPendingUpdates: true });
-console.log("Bot: sıra ve doğrulama akışı güncellendi.");
+console.log("Bot: çekiliş entegrasyonu eklendi.");
