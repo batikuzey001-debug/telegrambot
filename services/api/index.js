@@ -18,6 +18,7 @@ const BOT_WRITE_SECRET = process.env.BOT_WRITE_SECRET || "";
 
 /* ---------------- DB INIT ---------------- */
 async function initDb() {
+  // Base create
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id BIGSERIAL PRIMARY KEY,
@@ -42,7 +43,11 @@ async function initDb() {
     );
   `);
 
-  // idempotent kolon ekleme
+  // Eski şemalar için idempotent ALTER'lar
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name  TEXT;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS membership_id TEXT;`);
+
   await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS file_id TEXT;`);
   await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS image_url TEXT;`);
   await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;`);
@@ -93,14 +98,13 @@ async function initDb() {
       UNIQUE (raffle_key, external_id)
     );
 
-    -- Bildirim şablonları (planlı gönderim için)
     CREATE TABLE IF NOT EXISTS notification_templates (
       id BIGSERIAL PRIMARY KEY,
       key TEXT UNIQUE NOT NULL,
       title TEXT NOT NULL,
       content TEXT NOT NULL,
       image_url TEXT,
-      buttons JSONB DEFAULT '[]'::jsonb,  -- [{text, url}] opsiyonel
+      buttons JSONB DEFAULT '[]'::jsonb,
       active BOOLEAN NOT NULL DEFAULT TRUE,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
@@ -204,7 +208,6 @@ app.post("/users", async (req, res) => {
   res.json(rows[0]);
 });
 
-// LIST: status
 app.get("/users", async (_req, res) => {
   const q = `
     SELECT
@@ -423,7 +426,6 @@ function auth(req, res) {
   return true;
 }
 
-// Liste
 app.get("/admin/notifications/templates", async (req, res) => {
   if (!auth(req, res)) return;
   const { rows } = await pool.query(
@@ -432,7 +434,6 @@ app.get("/admin/notifications/templates", async (req, res) => {
   res.json(rows);
 });
 
-// Tek kayıt
 app.get("/admin/notifications/templates/:key", async (req, res) => {
   if (!auth(req, res)) return;
   const { rows } = await pool.query(
@@ -443,7 +444,6 @@ app.get("/admin/notifications/templates/:key", async (req, res) => {
   res.json(rows[0]);
 });
 
-// Oluştur
 app.post("/admin/notifications/templates", async (req, res) => {
   if (!auth(req, res)) return;
   const { key, title, content, image_url, buttons, active } = req.body || {};
@@ -459,7 +459,6 @@ app.post("/admin/notifications/templates", async (req, res) => {
   res.json(rows[0]);
 });
 
-// Güncelle
 app.put("/admin/notifications/templates/:key", async (req, res) => {
   if (!auth(req, res)) return;
   const { title, content, image_url, buttons, active } = req.body || {};
@@ -479,7 +478,6 @@ app.put("/admin/notifications/templates/:key", async (req, res) => {
   res.json(rows[0]);
 });
 
-// Sil
 app.delete("/admin/notifications/templates/:key", async (req, res) => {
   if (!auth(req, res)) return;
   const { rowCount } = await pool.query("DELETE FROM notification_templates WHERE key=$1", [req.params.key]);
