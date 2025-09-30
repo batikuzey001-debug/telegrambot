@@ -1,10 +1,7 @@
 FROM node:18-alpine
 WORKDIR /app
-
-# Bu Dockerfile services/api içinde olduğu için yerel yolları kullan
 COPY package*.json ./
-RUN npm ci --omit=dev
-
+RUN npm install --omit=dev
 COPY . .
 ENV NODE_ENV=production
 EXPOSE 3000
