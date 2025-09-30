@@ -36,7 +36,7 @@ export default function PendingPage() {
       })
     });
 
-    setMsg(r2.ok ? "Onaylandı ve bildirildi" : "Onaylandı, bildirim başarısız");
+    setMsg(r2.ok ? "Onaylandı ve bildirildi" : "Onaylandı, bildirim hatası");
     load();
   };
 
@@ -70,6 +70,7 @@ export default function PendingPage() {
               </td>
             </tr>
           ))}
+          {!items.length && <tr><td colSpan={6} style={{ textAlign:"center", color:"#666" }}>Bekleyen talep yok</td></tr>}
         </tbody>
       </table>
       {msg && <div style={{ marginTop: 8 }}>{msg}</div>}
