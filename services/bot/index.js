@@ -1,34 +1,131 @@
-import { Telegraf, Markup } from "telegraf";
+import { Telegraf, Markup, session } from "telegraf";
 
-const { BOT_TOKEN } = process.env;
-if (!BOT_TOKEN) {
-  throw new Error("BOT_TOKEN environment variable is required");
-}
+const { BOT_TOKEN, CHANNEL_USERNAME } = process.env;
+if (!BOT_TOKEN) throw new Error("BOT_TOKEN is required");
+if (!CHANNEL_USERNAME) throw new Error("CHANNEL_USERNAME is required"); // Örn: @resmikanal
 
 const bot = new Telegraf(BOT_TOKEN);
+bot.use(session()); // Neden: Üyelik ID girişinde kısa süreli durum tutmak için.
 
-// Menü seçenekleri
-const menu = Markup.keyboard([
-  ["Çekilişe Katıl"],
-  ["Etkinlikleri Gör"],
-  ["Hesap Bilgilerini Güncelle"]
+const joinKeyboard = Markup.inlineKeyboard([
+  Markup.button.url("Kanala Katıl", `https://t.me/${CHANNEL_USERNAME.replace("@", "")}`),
+  Markup.button.callback("Kontrol et", "verify_join")
+]);
+
+const roleMenu = Markup.keyboard([["RadissonBet Üyesiyim"], ["Misafirim"]]).resize();
+
+const memberMenu = Markup.keyboard([
+  ["Hesap Bilgilerimi Güncelle"],
+  ["Ücretsiz Etkinlikler ve Bonuslar"],
+  ["Bana Özel Etkinlikler ve Fırsatlar"]
 ]).resize();
 
-bot.start((ctx) => ctx.reply("Merhaba, hoş geldiniz!", menu));
-bot.hears(["Merhaba", "merhaba"], (ctx) =>
-  ctx.reply("Merhaba, hoş geldiniz!", menu)
+const guestMenu = Markup.keyboard([
+  ["RadissonBet üyesi olmak istiyorum"],
+  ["RadissonBet ayrıcalıkları"],
+  ["Etkinlikler ve fırsatlar"]
+]).resize();
+
+async function isChannelMember(ctx) {
+  try {
+    const { id } = ctx.from;
+    const member = await ctx.telegram.getChatMember(CHANNEL_USERNAME, id);
+    return ["creator", "administrator", "member"].includes(member.status);
+  } catch {
+    // Neden: Kanal gizli/erişim kısıtlı olabilir; kullanıcı muhtemelen üye değildir.
+    return false;
+  }
+}
+
+async function gateOrProceed(ctx) {
+  const ok = await isChannelMember(ctx);
+  if (!ok) {
+    await ctx.reply("Devam edebilmek için resmi kanala katılın.", joinKeyboard);
+    return false;
+  }
+  return true;
+}
+
+bot.start(async (ctx) => {
+  const ok = await gateOrProceed(ctx);
+  if (!ok) return;
+  if (ctx.session?.membershipId) {
+    await ctx.reply("Hoş geldiniz. Üyelik menüsü:", memberMenu);
+  } else {
+    await ctx.reply("Lütfen bir seçenek seçin:", roleMenu);
+  }
+});
+
+bot.hears(["Merhaba", "merhaba", "Start", "start"], async (ctx) => {
+  const ok = await gateOrProceed(ctx);
+  if (!ok) return;
+  if (ctx.session?.membershipId) {
+    await ctx.reply("Hoş geldiniz. Üyelik menüsü:", memberMenu);
+  } else {
+    await ctx.reply("Lütfen bir seçenek seçin:", roleMenu);
+  }
+});
+
+bot.action("verify_join", async (ctx) => {
+  const ok = await isChannelMember(ctx);
+  await ctx.answerCbQuery(ok ? "Üyelik doğrulandı" : "Hâlâ üye görünmüyor");
+  if (!ok) return;
+  await ctx.editMessageText("Teşekkürler. Devam edebilirsiniz.");
+  await ctx.reply("Lütfen bir seçenek seçin:", roleMenu);
+});
+
+bot.command("kontrol", async (ctx) => {
+  const ok = await isChannelMember(ctx);
+  await ctx.reply(ok ? "Üyelik doğrulandı." : "Hâlâ üye görünmüyor.", ok ? undefined : joinKeyboard);
+});
+
+// Rol seçimi
+bot.hears("RadissonBet Üyesiyim", async (ctx) => {
+  const ok = await gateOrProceed(ctx);
+  if (!ok) return;
+  ctx.session.awaitingMembershipId = true; // Neden: Sıradaki mesajın ID olduğunu anlamak için.
+  await ctx.reply("Üyelik ID’nizi yazın:");
+});
+
+bot.hears("Misafirim", async (ctx) => {
+  const ok = await gateOrProceed(ctx);
+  if (!ok) return;
+  await ctx.reply("Misafir menüsü:", guestMenu);
+});
+
+// Üyelik ID yakalama
+bot.on("text", async (ctx) => {
+  if (!ctx.session?.awaitingMembershipId) return;
+  const idText = ctx.message.text?.trim();
+  if (!idText) return;
+
+  ctx.session.membershipId = idText;        // Geçici. Sonraki adım: DB'ye kalıcı kaydet.
+  ctx.session.awaitingMembershipId = false;
+
+  await ctx.reply("Üyelik ID’niz kaydedildi. Üyelik menüsü:", memberMenu);
+});
+
+// Üye menüsü cevapları (dummy)
+bot.hears("Hesap Bilgilerimi Güncelle", (ctx) =>
+  ctx.reply("Hesap güncelleme yakında aktif olacak.")
+);
+bot.hears("Ücretsiz Etkinlikler ve Bonuslar", (ctx) =>
+  ctx.reply("Şu an ücretsiz etkinlik bulunmuyor.")
+);
+bot.hears("Bana Özel Etkinlikler ve Fırsatlar", (ctx) =>
+  ctx.reply("Size özel fırsatlar yakında sunulacak.")
 );
 
-// Menü cevapları
-bot.hears("Çekilişe Katıl", (ctx) =>
-  ctx.reply("Çekilişe katılımınız alındı (dummy mesaj).")
+// Misafir menüsü cevapları (dummy)
+bot.hears("RadissonBet üyesi olmak istiyorum", (ctx) =>
+  ctx.reply("Kayıt bağlantısı yakında eklenecek.")
 );
-bot.hears("Etkinlikleri Gör", (ctx) =>
-  ctx.reply("Şu an etkinlik listesi boş (dummy mesaj).")
+bot.hears("RadissonBet ayrıcalıkları", (ctx) =>
+  ctx.reply("Ayrıcalıklar listesi yakında eklenecek.")
 );
-bot.hears("Hesap Bilgilerini Güncelle", (ctx) =>
-  ctx.reply("Hesap bilgilerini güncelleme yakında aktif olacak.")
+bot.hears("Etkinlikler ve fırsatlar", (ctx) =>
+  ctx.reply("Genel etkinlik listesi yakında eklenecek.")
 );
 
 bot.launch();
-console.log("Bot with static menu running...");
+console.log("Bot with channel-gate and role menus running.");
