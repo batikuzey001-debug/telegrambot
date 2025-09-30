@@ -5,6 +5,6 @@ export async function GET() {
     headers: { Authorization: `Bearer ${process.env.ADMIN_TOKEN}` },
     cache: "no-store"
   });
-  const data = await r.json();
-  return NextResponse.json(data, { status: r.ok ? 200 : r.status });
+  const d = await r.json();
+  return NextResponse.json(d, { status: r.ok ? 200 : r.status });
 }
