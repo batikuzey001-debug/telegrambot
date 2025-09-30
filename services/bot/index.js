@@ -10,7 +10,7 @@ if (!APP_URL) throw new Error("APP_URL is required");
 
 const TTL = Number(CACHE_TTL_MS || 60000);
 
-// API client
+// --- API client
 const api = axios.create({
   baseURL: APP_URL,
   timeout: 3000,
@@ -18,7 +18,10 @@ const api = axios.create({
   httpsAgent: new https.Agent({ keepAlive: true })
 });
 
-// Ekran klavyeleri
+// --- Telegraf bot TANIMI (önce bu olmalı)
+const bot = new Telegraf(BOT_TOKEN);
+
+// --- Klavyeler
 const backRow = ["Geri", "Ana Menü"];
 const roleChoiceKb = Markup.keyboard([["RadissonBet Üyesiyim"], ["Misafirim"]]).resize();
 const memberMenu = Markup.keyboard(
@@ -33,15 +36,14 @@ const joinKeyboard = Markup.inlineKeyboard([
   Markup.button.callback("Kontrol et", "verify_join")
 ]);
 
-// Durum ve cache
-const state = new Map(); // userId -> { stage: 'welcome'|'channel_ok'|'member'|'guest', awaiting?: 'membership'|'fullname', tmpMembership?: string }
-const cache = new Map(); // key -> { value:{content,image_url,file_id}, exp }
+// --- Durum + cache
+const state = new Map(); // userId -> { stage, awaiting?, tmpMembership? }
+const cache = new Map(); // key -> { value, exp }
 const getCached = (k)=>{const it=cache.get(k);return it&&it.exp>Date.now()?it.value:null;};
 const setCached = (k,v,ttl=TTL)=>cache.set(k,{value:v,exp:Date.now()+ttl});
 async function fetchMessage(key){ const {data}=await api.get(`/messages/${key}`); setCached(key,data); return data; }
 async function getMessage(key){ const c=getCached(key); if(c){ fetchMessage(key).catch(()=>{}); return c; } try{ return await fetchMessage(key);}catch{ return {content:"İçerik bulunamadı."}; } }
 
-// Metin anlık, görsel arkada; ilk görselde file_id sakla
 async function sendMessageByKey(ctx, key, extraKb){
   const msg = await getMessage(key);
   const textP = ctx.reply(msg.content, extraKb).catch(()=>{});
@@ -66,8 +68,7 @@ async function isChannelMember(ctx){
 }
 function S(uid){ if(!state.has(uid)) state.set(uid,{ stage:"welcome" }); return state.get(uid); }
 
-// ---- AKIŞ KURALLARI ----
-// 1) /start: sadece hoş geldin → kanal kontrolü → ÜYE DEĞİLSE yönlendirme, ÜYEYSE rol seçimi
+// ---- Akış
 bot.start(async (ctx)=>{
   const s = S(ctx.from.id);
   await sendMessageByKey(ctx,"welcome");
@@ -81,7 +82,6 @@ bot.start(async (ctx)=>{
   await ctx.reply("Lütfen bir seçenek seçin:", roleChoiceKb);
 });
 
-// 2) “Kontrol et” butonu: sadece kanal doğrulaması → rol seçimi
 bot.action("verify_join", async (ctx)=>{
   const s = S(ctx.from.id);
   const ok = await isChannelMember(ctx);
@@ -92,7 +92,6 @@ bot.action("verify_join", async (ctx)=>{
   await ctx.reply("Lütfen bir seçenek seçin:", roleChoiceKb);
 });
 
-// 3) Selam tetikleri: /start ile aynı davranış. Menü YOK.
 bot.hears(["Merhaba","merhaba","Start","start"], async (ctx)=>{
   const s = S(ctx.from.id);
   await sendMessageByKey(ctx,"welcome");
@@ -105,7 +104,6 @@ bot.hears(["Merhaba","merhaba","Start","start"], async (ctx)=>{
   await ctx.reply("Lütfen bir seçenek seçin:", roleChoiceKb);
 });
 
-// 4) Rol seçimi: burada menü ilk kez çıkar
 bot.hears("RadissonBet Üyesiyim", async (ctx)=>{
   const s = S(ctx.from.id);
   if (s.stage !== "channel_ok" && s.stage !== "guest" && s.stage !== "member") {
@@ -124,7 +122,6 @@ bot.hears("Misafirim", async (ctx)=>{
   await ctx.reply("Misafir menüsü:", guestMenu);
 });
 
-// 5) Üyelik ID akışı
 bot.on("text", async (ctx)=>{
   const s = S(ctx.from.id);
   const text = (ctx.message.text || "").trim();
@@ -164,14 +161,14 @@ bot.on("text", async (ctx)=>{
         full_name: full
       });
     }catch{}
-    s.stage = "guest"; // rol kesinleşmediği için menü olarak misafir göster
+    s.stage = "guest";
     s.awaiting = undefined;
     s.tmpMembership = undefined;
     return ctx.reply("Teşekkürler. Talebiniz alındı.", guestMenu);
   }
 });
 
-// 6) Navigasyon ve menü korumaları
+// Navigasyon
 bot.hears("Ana Menü", async (ctx)=>{
   const s = S(ctx.from.id);
   if (s.stage === "member") return ctx.reply("Ana menü:", memberMenu);
@@ -185,7 +182,7 @@ bot.hears("Geri", async (ctx)=>{
   return ctx.reply("Önce kanala katılın ve rol seçin.", Markup.removeKeyboard());
 });
 
-// 7) Misafir menüsü aksiyonları
+// Misafir aksiyonları
 bot.hears("RadissonBet üyesi olmak istiyorum", async (ctx)=>{
   const kb = SIGNUP_URL ? Markup.inlineKeyboard([Markup.button.url("Kayıt Ol", SIGNUP_URL)]) : undefined;
   await sendMessageByKey(ctx,"guest_become_member", kb ? { reply_markup: kb.reply_markup } : undefined);
@@ -196,12 +193,12 @@ bot.hears("RadissonBet ayrıcalıkları", async (ctx)=>{
 });
 bot.hears("Etkinlikler ve fırsatlar", (ctx)=> sendMessageByKey(ctx,"events"));
 
-// 8) Üye menüsü aksiyonları
+// Üye aksiyonları
 bot.hears("Hesap Bilgilerimi Güncelle", (ctx)=> sendMessageByKey(ctx,"member_update_account"));
 bot.hears("Ücretsiz Etkinlikler ve Bonuslar", (ctx)=> sendMessageByKey(ctx,"member_free_events"));
 bot.hears("Bana Özel Etkinlikler ve Fırsatlar", (ctx)=> sendMessageByKey(ctx,"member_personal_offers"));
 
-// 9) Kampanyalar ve çekiliş (her iki rolde de erişilebilir, ama rol seçimi sonrası)
+// Çekiliş ve kampanyalar
 bot.hears("Çekilişe Katıl", async (ctx)=>{
   const s = S(ctx.from.id);
   if (s.stage !== "member" && s.stage !== "guest") return ctx.reply("Önce rol seçin.", Markup.removeKeyboard());
@@ -234,4 +231,4 @@ bot.action(/raffle_join:.+/, async (ctx)=>{
 });
 
 bot.launch({ dropPendingUpdates: true });
-console.log("Bot: sıralama sabitlendi. Menü yalnızca kanal doğrulaması + rol seçiminden sonra.");
+console.log("Bot: sıralama ve tanım düzeltildi.");
