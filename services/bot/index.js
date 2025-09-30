@@ -82,3 +82,9 @@ bot.action(/raffle_join:.+/, async (ctx)=>{ const key=ctx.callbackQuery.data.spl
 
 bot.launch({ dropPendingUpdates: true });
 console.log("Bot http + notify hazır.");
+bot.catch(async (err, ctx) => {
+  console.error("Bot error:", err);
+  try {
+    await ctx.reply("⚠️ İşlem sırasında hata oluştu. Lütfen tekrar deneyin.");
+  } catch {}
+});
