@@ -1,3 +1,4 @@
+// apps/backoffice/app/messages/page.tsx
 "use client";
 import { useEffect, useMemo, useState } from "react";
 
@@ -25,7 +26,7 @@ export default function MessagesPage() {
           setContent(arr[0].content || "");
           setImageUrl(arr[0].image_url || "");
         }
-        setStatus(arr.length ? "" : "Kayıt bulunamadı.");
+        setStatus(arr.length ? "" : "Kayıt yok.");
       } catch {
         setStatus("API erişilemedi.");
         setItems([]);
@@ -36,7 +37,7 @@ export default function MessagesPage() {
 
   // Seçim değişince formu doldur
   useEffect(() => {
-    const m = items.find(x => x.key === sel);
+    const m = items.find((x) => x.key === sel);
     if (m) {
       setContent(m.content || "");
       setImageUrl(m.image_url || "");
@@ -45,7 +46,7 @@ export default function MessagesPage() {
   }, [sel, items]);
 
   const filtered = useMemo(
-    () => items.filter(i => i.key.toLowerCase().includes(q.toLowerCase())),
+    () => items.filter((i) => i.key.toLowerCase().includes(q.toLowerCase())),
     [items, q]
   );
 
@@ -56,18 +57,20 @@ export default function MessagesPage() {
       const res = await fetch(`/api/messages/${sel}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content, image_url: imageUrl || null })
+        body: JSON.stringify({ content, image_url: imageUrl || null }),
       });
       const body = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setStatus(`Hata: ${body?.error || res.status}`);
+      if (!res.ok || body?.ok === false) {
+        setStatus(`Hata: ${body?.data?.error || body?.error || res.status}`);
         return;
       }
-      // listeyi yerelde güncelle
-      setItems(prev => prev.map(x => (x.key === sel ? { ...x, content, image_url: imageUrl } : x)));
+      // Yerel listeyi güncelle
+      setItems((prev) =>
+        prev.map((x) => (x.key === sel ? { ...x, content, image_url: imageUrl } : x))
+      );
       setStatus("Kaydedildi. Bot cache temizlendi.");
-    } catch {
-      setStatus("Kayıt sırasında ağ hatası.");
+    } catch (e: any) {
+      setStatus(`Ağ hatası: ${String(e)}`);
     }
   }
 
@@ -78,11 +81,11 @@ export default function MessagesPage() {
         <input
           placeholder="Ara (key)"
           value={q}
-          onChange={e => setQ(e.target.value)}
+          onChange={(e) => setQ(e.target.value)}
           style={{ width: "100%", marginBottom: 8 }}
         />
         <div style={{ maxHeight: "70vh", overflow: "auto", border: "1px solid #eee" }}>
-          {filtered.map(m => (
+          {filtered.map((m) => (
             <div
               key={m.key}
               onClick={() => setSel(m.key)}
@@ -90,7 +93,7 @@ export default function MessagesPage() {
                 padding: 8,
                 cursor: "pointer",
                 background: sel === m.key ? "#eef2ff" : "transparent",
-                borderBottom: "1px solid #eee"
+                borderBottom: "1px solid #eee",
               }}
             >
               <div style={{ fontWeight: 600 }}>{m.key}</div>
@@ -107,19 +110,29 @@ export default function MessagesPage() {
         <h2>{sel || "Seçim yapın"}</h2>
 
         <label>İçerik</label>
-        <textarea rows={8} value={content} onChange={e => setContent(e.target.value)} />
+        <textarea rows={8} value={content} onChange={(e) => setContent(e.target.value)} />
 
         <label>Görsel URL</label>
-        <input value={imageUrl} onChange={e => setImageUrl(e.target.value)} placeholder="https://..." />
+        <input value={imageUrl} onChange={(e) => setImageUrl(e.target.value)} placeholder="https://..." />
 
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <button onClick={save} disabled={!sel}>Kaydet</button>
+          <button onClick={save} disabled={!sel}>
+            Kaydet
+          </button>
           {status && <span>{status}</span>}
         </div>
 
         {/* Önizleme */}
         <div style={{ marginTop: 16 }}>
-          <div style={{ width: 360, border: "1px solid #ddd", borderRadius: 8, padding: 12, background: "#f8fafc" }}>
+          <div
+            style={{
+              width: 360,
+              border: "1px solid #ddd",
+              borderRadius: 8,
+              padding: 12,
+              background: "#f8fafc",
+            }}
+          >
             <div style={{ fontSize: 12, color: "#64748b", marginBottom: 6 }}>Telegram Önizleme</div>
             {imageUrl ? (
               <figure>
