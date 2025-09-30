@@ -38,38 +38,19 @@ const state = new Map(); // userId -> { membershipId?: string, awaiting?: boolea
 
 // Basit cache
 const cache = new Map(); // key -> { value:{content,image_url}, exp }
-
-function getCached(key) {
-  const it = cache.get(key);
-  return it && it.exp > Date.now() ? it.value : null;
-}
-function setCached(key, value, ttl = TTL) {
-  cache.set(key, { value, exp: Date.now() + ttl });
-}
-async function fetchMessage(key) {
-  const { data } = await httpClient.get(`/messages/${key}`);
-  setCached(key, data);
-  return data;
-}
+function getCached(key) { const it = cache.get(key); return it && it.exp > Date.now() ? it.value : null; }
+function setCached(key, value, ttl = TTL) { cache.set(key, { value, exp: Date.now() + ttl }); }
+async function fetchMessage(key) { const { data } = await httpClient.get(`/messages/${key}`); setCached(key, data); return data; }
 async function getMessage(key) {
   const c = getCached(key);
-  if (c) {
-    fetchMessage(key).catch(() => {});
-    return c;
-  }
-  try {
-    return await fetchMessage(key);
-  } catch {
-    return { content: "İçerik bulunamadı.", image_url: null };
-  }
+  if (c) { fetchMessage(key).catch(() => {}); return c; }
+  try { return await fetchMessage(key); } catch { return { content: "İçerik bulunamadı.", image_url: null }; }
 }
 
-// Ortak gönderici: image varsa fotoğraf + caption, yoksa düz metin
+// Ortak gönderici
 async function sendMessageByKey(ctx, key, extraKb) {
   const msg = await getMessage(key);
-  if (msg.image_url) {
-    return ctx.replyWithPhoto(msg.image_url, { caption: msg.content, ...extraKb });
-  }
+  if (msg.image_url) return ctx.replyWithPhoto(msg.image_url, { caption: msg.content, ...extraKb });
   return ctx.reply(msg.content, extraKb);
 }
 
@@ -82,60 +63,62 @@ async function isChannelMember(ctx) {
   try {
     const member = await ctx.telegram.getChatMember(CHANNEL_USERNAME, ctx.from.id);
     return ["creator", "administrator", "member"].includes(member.status);
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
-async function gateOrProceed(ctx) {
-  const ok = await isChannelMember(ctx);
-  if (!ok) {
+function getUserState(uid) { if (!state.has(uid)) state.set(uid, {}); return state.get(uid); }
+
+// ---- Akış: Önce hoş geldin, sonra kanal uyarısı / menü ----
+async function welcomeAndGuide(ctx) {
+  await sendMessageByKey(ctx, "welcome");
+  const isMember = await isChannelMember(ctx);
+  if (!isMember) {
+    // Devam edebilmek için kanal uyarısı
     await sendMessageByKey(ctx, "not_member", { reply_markup: joinKeyboard.reply_markup });
     return false;
   }
   return true;
 }
-function getUserState(uid) { if (!state.has(uid)) state.set(uid, {}); return state.get(uid); }
 
 // Start
 bot.start(async (ctx) => {
-  const ok = await gateOrProceed(ctx);
+  const ok = await welcomeAndGuide(ctx);
   if (!ok) return;
   const s = getUserState(ctx.from.id);
-  await sendMessageByKey(ctx, "welcome");
   if (s.membershipId) await ctx.reply("Üyelik menüsü:", memberMenu);
   else await ctx.reply("Lütfen bir seçenek seçin:", roleMenu);
 });
 
 // Selam
 bot.hears(["Merhaba", "merhaba", "Start", "start"], async (ctx) => {
-  const ok = await gateOrProceed(ctx);
+  const ok = await welcomeAndGuide(ctx);
   if (!ok) return;
-  await sendMessageByKey(ctx, "welcome");
   const s = getUserState(ctx.from.id);
   await ctx.reply("Menü:", s.membershipId ? memberMenu : guestMenu);
 });
 
-// Kanal kontrol
+// Kanal kontrol butonu
 bot.action("verify_join", async (ctx) => {
   const ok = await isChannelMember(ctx);
   await ctx.answerCbQuery(ok ? "Üyelik doğrulandı" : "Hâlâ üye görünmüyor");
   if (!ok) return;
   await ctx.editMessageText("Teşekkürler. Devam edebilirsiniz.");
-  await sendMessageByKey(ctx, "welcome");
-  await ctx.reply("Lütfen bir seçenek seçin:", roleMenu);
+  const s = getUserState(ctx.from.id);
+  if (s.membershipId) await ctx.reply("Üyelik menüsü:", memberMenu);
+  else await ctx.reply("Lütfen bir seçenek seçin:", roleMenu);
 });
 
 // Rol seçimi
 bot.hears("RadissonBet Üyesiyim", async (ctx) => {
-  const ok = await gateOrProceed(ctx);
-  if (!ok) return;
+  const isMember = await isChannelMember(ctx);
+  if (!isMember) return sendMessageByKey(ctx, "not_member", { reply_markup: joinKeyboard.reply_markup });
   const s = getUserState(ctx.from.id);
   s.awaiting = true;
   await ctx.reply("Üyelik ID’nizi yazın:");
 });
+
 bot.hears("Misafirim", async (ctx) => {
-  const ok = await gateOrProceed(ctx);
-  if (!ok) return;
+  const isMember = await isChannelMember(ctx);
+  if (!isMember) return sendMessageByKey(ctx, "not_member", { reply_markup: joinKeyboard.reply_markup });
   await ctx.reply("Misafir menüsü:", guestMenu);
 });
 
@@ -155,9 +138,7 @@ bot.on("text", async (ctx) => {
       name: ctx.from.username || ctx.from.first_name || null,
       membership_id: idText
     });
-  } catch (e) {
-    console.error("Save user error:", e?.message);
-  }
+  } catch (e) { console.error("Save user error:", e?.message); }
 
   await ctx.reply("Üyelik ID’niz kaydedildi. Üyelik menüsü:", memberMenu);
 });
@@ -171,4 +152,4 @@ bot.hears("Ücretsiz Etkinlikler ve Bonuslar", (ctx) => sendMessageByKey(ctx, "m
 bot.hears("Bana Özel Etkinlikler ve Fırsatlar", (ctx) => sendMessageByKey(ctx, "member_personal_offers"));
 
 bot.launch();
-console.log("Bot sending images when image_url exists.");
+console.log("Bot: önce hoş geldin, sonra kanal uyarısı veya menü.");
