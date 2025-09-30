@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import jwt from "jsonwebtoken";
 
 const COOKIE_NAME = "bo_token";
 
-// Koruma: /login ve /api/login hariç her şeyi auth ister
+// Not: Middleware Edge'de çalışır. JWT verify burada yapılmaz.
+// Sadece cookie var mı kontrol edilir. Asıl doğrulama server route'larda yapılır.
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
   if (pathname.startsWith("/login") || pathname.startsWith("/api/login")) {
@@ -12,12 +12,7 @@ export function middleware(req: NextRequest) {
   }
   const token = req.cookies.get(COOKIE_NAME)?.value;
   if (!token) return NextResponse.redirect(new URL("/login", req.url));
-  try {
-    jwt.verify(token, process.env.JWT_SECRET!);
-    return NextResponse.next();
-  } catch {
-    return NextResponse.redirect(new URL("/login", req.url));
-  }
+  return NextResponse.next();
 }
 
 export const config = {
