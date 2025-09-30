@@ -26,6 +26,10 @@ async function initDb() {
       first_name TEXT,
       last_name  TEXT,
       membership_id TEXT,
+      tg_first_name TEXT,
+      tg_last_name  TEXT,
+      tg_username   TEXT,
+      submitted_username TEXT,
       preferences JSONB DEFAULT '{}'::jsonb,
       bonus JSONB DEFAULT '{}'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -46,6 +50,10 @@ async function initDb() {
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name  TEXT;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS membership_id TEXT;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_first_name TEXT;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_last_name  TEXT;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_username   TEXT;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS submitted_username TEXT;`);
 
   await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS file_id TEXT;`);
   await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS image_url TEXT;`);
@@ -193,24 +201,39 @@ app.put("/bot/messages/:key/file-id", async (req, res) => {
 
 /* ---------------- USERS ---------------- */
 app.post("/users", async (req, res) => {
-  const { external_id, name, first_name, last_name, membership_id } = req.body || {};
+  const {
+    external_id, name, first_name, last_name, membership_id,
+    tg_first_name, tg_last_name, tg_username, submitted_username
+  } = req.body || {};
   if (!external_id) return res.status(400).json({ error: "external_id required" });
+
   const q = `
-    INSERT INTO users (external_id, name, first_name, last_name, membership_id)
-    VALUES ($1,$2,$3,$4,$5)
+    INSERT INTO users (
+      external_id, name, first_name, last_name, membership_id,
+      tg_first_name, tg_last_name, tg_username, submitted_username
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
     ON CONFLICT (external_id) DO UPDATE SET
-      name=EXCLUDED.name,
-      first_name=COALESCE(EXCLUDED.first_name, users.first_name),
-      last_name =COALESCE(EXCLUDED.last_name,  users.last_name),
-      membership_id=COALESCE(EXCLUDED.membership_id, users.membership_id),
-      updated_at=now()
-    RETURNING id, external_id, name, first_name, last_name, membership_id
+      name                = COALESCE(EXCLUDED.name, users.name),
+      first_name          = COALESCE(EXCLUDED.first_name, users.first_name),
+      last_name           = COALESCE(EXCLUDED.last_name, users.last_name),
+      membership_id       = COALESCE(EXCLUDED.membership_id, users.membership_id),
+      tg_first_name       = COALESCE(EXCLUDED.tg_first_name, users.tg_first_name),
+      tg_last_name        = COALESCE(EXCLUDED.tg_last_name,  users.tg_last_name),
+      tg_username         = COALESCE(EXCLUDED.tg_username,   users.tg_username),
+      submitted_username  = COALESCE(EXCLUDED.submitted_username, users.submitted_username),
+      updated_at          = now()
+    RETURNING id, external_id, name, first_name, last_name, membership_id,
+              tg_first_name, tg_last_name, tg_username, submitted_username
   `;
-  const { rows } = await pool.query(q, [external_id, name || null, first_name || null, last_name || null, membership_id || null]);
+  const { rows } = await pool.query(q, [
+    external_id, name || null, first_name || null, last_name || null, membership_id || null,
+    tg_first_name || null, tg_last_name || null, tg_username || null, submitted_username || null
+  ]);
   res.json(rows[0]);
 });
 
-// users list with status
+// users list with status (+telegram alanları)
 app.get("/users", async (_req, res) => {
   const q = `
     SELECT
@@ -220,6 +243,10 @@ app.get("/users", async (_req, res) => {
       u.first_name,
       u.last_name,
       u.membership_id,
+      u.tg_first_name,
+      u.tg_last_name,
+      u.tg_username,
+      u.submitted_username,
       CASE
         WHEN u.membership_id IS NOT NULL THEN 'member'
         WHEN EXISTS (
@@ -244,6 +271,27 @@ app.get("/users/by-external/:external_id", async (req, res) => {
   );
   if (!rows.length) return res.status(404).json({ error: "not_found" });
   res.json(rows[0]);
+});
+
+// user status (member|pending|guest)
+app.get("/users/status/:external_id", async (req, res) => {
+  const ext = String(req.params.external_id);
+  const ures = await pool.query(
+    "SELECT id, external_id, first_name, last_name, membership_id FROM users WHERE external_id=$1 LIMIT 1",
+    [ext]
+  );
+  const user = ures.rows[0] || null;
+  const pres = await pool.query(
+    "SELECT id, provided_membership_id, full_name, status, created_at FROM pending_verifications WHERE external_id=$1 AND status='pending' ORDER BY id DESC LIMIT 1",
+    [ext]
+  );
+  const pending = pres.rows[0] || null;
+
+  let stage = "guest";
+  if (user?.membership_id) stage = "member";
+  else if (pending) stage = "pending";
+
+  res.json({ stage, user, pending });
 });
 
 /* ---------------- MEMBERS & PENDING ---------------- */
