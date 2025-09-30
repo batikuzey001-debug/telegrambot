@@ -86,7 +86,7 @@ const KB = {
     [Markup.button.callback("🏠 Ana Menü", "go_root")]
   ]),
   PENDING_HOME: Markup.inlineKeyboard([
-    [Markup.button.callback("📄 Başvuru Durumunu Yenile", "p_refresh")],
+    [Markup.button.callback("🔄 Durumu Yenile", "p_refresh")],
     [Markup.button.callback("🏠 Ana Menü", "go_root")]
   ]),
   JOIN: Markup.inlineKeyboard([
@@ -96,16 +96,16 @@ const KB = {
 };
 
 // State
-const state = new Map(); // uid -> { stage:'ROOT'|'MEMBER'|'GUEST'|'PENDING', awaiting?, tmpMembership? }
+const state = new Map(); // uid -> { stage:'ROOT'|'MEMBER'|'GUEST'|'PENDING', awaiting?, tmpMembership?, newUser? }
 const S = uid => { if(!state.has(uid)) state.set(uid,{ stage:"ROOT" }); return state.get(uid); };
 
 // Render helpers
 const showRoot    = (ctx)=> ctx.reply("👇 Lütfen bir seçenek seçin:", KB.ROOT);
 const showMember  = (ctx,name)=> ctx.reply(name?`👋 Merhaba ${name}\n🧭 Üyelik menüsü:`:"🧭 Üyelik menüsü:", KB.MEMBER_HOME);
 const showGuest   = (ctx)=> ctx.reply("🧭 Misafir menüsü:", KB.GUEST_HOME);
-const showPending = (ctx)=> ctx.reply("⏳ Başvurunuz inceleniyor. Onaylandığında üyelik ana sayfanız açılacak.", KB.PENDING_HOME);
+const showPending = (ctx)=> ctx.reply("⏳ Başvurunuz inceleniyor. Onaylanınca üyelik ana sayfanız açılacak.", KB.PENDING_HOME);
 
-// Start
+// Başlangıç
 bot.start(async (ctx)=>{
   await sendMessageByKey(ctx,"welcome");
   const ok = await isChannelMember(ctx);
@@ -134,54 +134,110 @@ bot.action("verify_join", async (ctx)=>{
   return showRoot(ctx);
 });
 
-// ROOT → Üyelik akışı
+// ROOT → Üyelik akışı (KULLANICI ADI → ID → ONAY)
 bot.action("role_member", async (ctx)=>{
-  S(ctx.from.id).awaiting = "membership";
-  await ctx.reply("🔢 Üyelik ID’nizi girin (sadece rakam):");
+  const s = S(ctx.from.id);
+  s.newUser = { username: null, id: null };
+  s.awaiting = "username";
+  await ctx.reply("🧾 RadissonBet kullanıcı adınız nedir?");
 });
+
 bot.on("text", async (ctx)=>{
   const s = S(ctx.from.id);
   const text = (ctx.message.text || "").trim();
 
-  if (s.awaiting === "membership") {
-    if (!/^[0-9]+$/.test(text)) return ctx.reply("⚠️ Geçersiz ID. Sadece rakam girin.");
-    try{
-      const { data } = await api.get(`/members/${text}`);
-      if (data.found) {
-        await api.post(`/users`, {
-          external_id:String(ctx.from.id),
-          name: ctx.from.username || ctx.from.first_name || null,
-          first_name: data.first_name,
-          last_name: data.last_name,
-          membership_id: text
-        });
-        s.awaiting = undefined; s.stage="MEMBER";
-        return showMember(ctx, `${data.first_name} ${data.last_name}`);
-      }
-      s.awaiting = "fullname"; s.tmpMembership=text;
-      return ctx.reply("📝 ID bulunamadı. Lütfen `Ad Soyad` yazın:");
-    }catch{
-      return ctx.reply("⚠️ Şu an doğrulama yapılamıyor. Tekrar deneyin.");
-    }
+  // 1) Kullanıcı adı
+  if (s.awaiting === "username") {
+    if (!text || text.length < 2) return ctx.reply("⚠️ Geçerli bir kullanıcı adı yazın.");
+    s.newUser.username = text;
+    s.awaiting = "membership";
+    return ctx.reply("🔢 Üyelik ID’nizi girin (sadece rakam):");
   }
 
+  // 2) Üyelik ID
+  if (s.awaiting === "membership") {
+    if (!/^[0-9]+$/.test(text)) return ctx.reply("⚠️ Geçersiz ID. Sadece rakam girin.");
+    s.newUser.id = text;
+
+    // 3) ONAY PANELİ
+    const confirmText =
+      "🧩 Bilgilerini Onayla ℹ️\n" +
+      "~~~~~~~~~~~~~~~~~~~~\n" +
+      `👤 Kullanıcı Adı : ${s.newUser.username}\n` +
+      `🪪 Üyelik ID     : ${s.newUser.id}\n` +
+      "~~~~~~~~~~~~~~~~~~~~\n" +
+      "👉 Bilgiler doğruysa **Evet**, yanlışsa **Hayır**.\n" +
+      "Geri dönmek için **Başa Dön**.";
+    const kb = Markup.inlineKeyboard([
+      [Markup.button.callback("✅ Evet", "confirm_yes"), Markup.button.callback("❌ Hayır", "confirm_no")],
+      [Markup.button.callback("🔙 Başa Dön", "confirm_restart")]
+    ]);
+    s.awaiting = "confirm";
+    return ctx.reply(confirmText, kb);
+  }
+
+  // 4) FULLNAME (ID bulunamadı → pending)
   if (s.awaiting === "fullname") {
-    const full = text.replace(/\s+/g," ").trim();
+    const full = text.replace(/\s+/g, " ").trim();
     if (!full.includes(" ")) return ctx.reply("⚠️ Lütfen ad ve soyadı birlikte yazın.");
     try{
       await api.post(`/pending-requests`, {
         external_id:String(ctx.from.id),
-        provided_membership_id:s.tmpMembership || null,
+        provided_membership_id:s.newUser?.id || null,
         full_name: full
       });
-    }catch{}
-    s.awaiting = undefined; s.tmpMembership=undefined; s.stage="PENDING";
+    }catch(e){ console.error("pending error:", e?.message); }
+    s.awaiting = undefined; s.tmpMembership=undefined; s.stage="PENDING"; s.newUser = undefined;
+    await ctx.reply("📩 Talebiniz alındı. Onay bekleniyor.");
     return showPending(ctx);
   }
 });
 
-// ROOT → Misafir
-bot.action("role_guest", async (ctx)=>{ S(ctx.from.id).stage="GUEST"; return showGuest(ctx); });
+// ONAY AKIŞ BUTONLARI
+bot.action("confirm_restart", async (ctx)=>{
+  const s = S(ctx.from.id);
+  s.newUser = { username:null, id:null };
+  s.awaiting = "username";
+  await ctx.editMessageText("🔄 Baştan alalım. Kullanıcı adınızı yazın:");
+});
+
+bot.action("confirm_no", async (ctx)=>{
+  const s = S(ctx.from.id);
+  s.awaiting = "username";
+  await ctx.editMessageText("❌ Bilgiler yanlış. Lütfen kullanıcı adınızı tekrar yazın:");
+});
+
+bot.action("confirm_yes", async (ctx)=>{
+  const s = S(ctx.from.id);
+  if (!s?.newUser?.id || !s?.newUser?.username) {
+    await ctx.answerCbQuery("⚠️ Eksik bilgi").catch(()=>{});
+    return showRoot(ctx);
+  }
+  try{
+    const { data } = await api.get(`/members/${s.newUser.id}`);
+    if (data.found) {
+      await api.post(`/users`, {
+        external_id:String(ctx.from.id),
+        name: s.newUser.username,
+        first_name: data.first_name, last_name: data.last_name,
+        membership_id: s.newUser.id
+      });
+      s.stage = "MEMBER"; s.awaiting = undefined;
+      const name = `${data.first_name} ${data.last_name}`;
+      try { await ctx.editMessageText(`✅ Hoş geldiniz ${name}`); } catch {}
+      s.newUser = undefined;
+      return showMember(ctx, name);
+    } else {
+      // ID eşleşmedi → fullname iste
+      s.awaiting = "fullname";
+      try { await ctx.editMessageText("❓ ID bulunamadı. Lütfen `Ad Soyad` yazın:"); } catch {}
+    }
+  }catch(e){
+    console.error("confirm_yes error:", e?.message);
+    await ctx.answerCbQuery("⚠️ Doğrulama yapılamadı").catch(()=>{});
+    return showRoot(ctx);
+  }
+});
 
 // Pending yenile
 bot.action("p_refresh", async (ctx)=>{
@@ -194,16 +250,31 @@ bot.action("p_refresh", async (ctx)=>{
   return ctx.answerCbQuery("⏳ Hâlâ beklemede").catch(()=>{});
 });
 
-// Member panelleri (yalnız üye)
+// Guest
+bot.action("role_guest", async (ctx)=>{ S(ctx.from.id).stage="GUEST"; return showGuest(ctx); });
+bot.action("g_signup", async (ctx)=>{
+  const kb = SIGNUP_URL
+    ? Markup.inlineKeyboard([[Markup.button.url("📝 Kayıt Ol", SIGNUP_URL)],[Markup.button.callback("↩️ Geri","go_guest")]])
+    : KB.GUEST_HOME;
+  return ctx.reply("📝 Üye Ol açıklaması:", kb);
+});
+bot.action("g_benefits", async (ctx)=>{
+  const kb = SOCIAL_URL
+    ? Markup.inlineKeyboard([[Markup.button.url("🏅 Radisson Sosyal", SOCIAL_URL)],[Markup.button.callback("↩️ Geri","go_guest")]])
+    : KB.GUEST_HOME;
+  return ctx.reply("🏅 Ayrıcalıklar:", kb);
+});
+bot.action("g_events",   (ctx)=> sendMessageByKey(ctx,"events",KB.GUEST_HOME));
+bot.action("g_campaigns",(ctx)=> ctx.reply("📢 Kampanyalar (katılmak için üye olunmalı).", KB.GUEST_HOME));
+bot.action("go_guest",   (ctx)=> ctx.reply("🧭 Misafir menüsü:", KB.GUEST_HOME));
+
+// Member panelleri (sadece üye)
 async function requireMember(ctx){
   const st = await getStatus(String(ctx.from.id));
-  if (st.stage !== "member") {
-    await ctx.answerCbQuery("⛔ Üyelik gerekli", { show_alert: true }).catch(()=>{});
-    return false;
-  }
+  if (st.stage !== "member") { await ctx.answerCbQuery("⛔ Üyelik gerekli",{show_alert:true}).catch(()=>{}); return false; }
   return true;
 }
-bot.action("m_account", async (ctx)=>{ if(!(await requireMember(ctx))) return; await ctx.reply("🧾 Hesap bilgileri yakında düzenlenebilir.", KB.MEMBER_HOME); });
+bot.action("m_account", async (ctx)=>{ if(!(await requireMember(ctx))) return; await ctx.reply("🧾 Hesap bilgileri yakında.", KB.MEMBER_HOME); });
 bot.action("m_free",    async (ctx)=>{ if(!(await requireMember(ctx))) return; return sendMessageByKey(ctx,"member_free_events",KB.MEMBER_HOME); });
 bot.action("m_offers",  async (ctx)=>{ if(!(await requireMember(ctx))) return; return sendMessageByKey(ctx,"member_personal_offers",KB.MEMBER_HOME); });
 bot.action("m_campaigns", async (ctx)=>{
@@ -226,27 +297,10 @@ bot.action("m_raffle", async (ctx)=>{
   }catch{ return ctx.reply("⚠️ Çekiliş kaydı yapılamadı.", KB.MEMBER_HOME); }
 });
 
-// Guest panelleri (çekiliş yok)
-bot.action("g_signup", async (ctx)=>{
-  const kb = SIGNUP_URL
-    ? Markup.inlineKeyboard([[Markup.button.url("📝 Kayıt Ol", SIGNUP_URL)],[Markup.button.callback("↩️ Geri","go_guest")]])
-    : KB.GUEST_HOME;
-  return ctx.reply("📝 Üye Ol açıklaması:", kb);
-});
-bot.action("g_benefits", async (ctx)=>{
-  const kb = SOCIAL_URL
-    ? Markup.inlineKeyboard([[Markup.button.url("🏅 Radisson Sosyal", SOCIAL_URL)],[Markup.button.callback("↩️ Geri","go_guest")]])
-    : KB.GUEST_HOME;
-  return ctx.reply("🏅 Ayrıcalıklar:", kb);
-});
-bot.action("g_events",   (ctx)=> sendMessageByKey(ctx,"events",KB.GUEST_HOME));
-bot.action("g_campaigns",(ctx)=> ctx.reply("📢 Kampanyalar (katılmak için üye olmanız gerekir).", KB.GUEST_HOME));
-bot.action("go_guest",   (ctx)=> ctx.reply("🧭 Misafir menüsü:", KB.GUEST_HOME));
-
 // Ana menü
 bot.action("go_root", (ctx)=> showRoot(ctx));
 
-// Dinamik çekiliş join (yalnız üye)
+// Dinamik çekiliş (yalnız üye)
 bot.action(/raffle_join:.+/, async (ctx)=>{
   if(!(await requireMember(ctx))) return;
   const key = ctx.callbackQuery.data.split(":")[1];
@@ -258,10 +312,10 @@ bot.action(/raffle_join:.+/, async (ctx)=>{
   }catch{ await ctx.answerCbQuery("⚠️ Hata").catch(()=>{}); }
 });
 
-// Bilinmeyen callback → köke dön
+// Bilinmeyen callback → kök + log
 bot.on("callback_query", async (ctx, next)=>{
   const d = ctx.callbackQuery?.data || "";
-  const known = /^(role_|g_|m_|go_|p_refresh|raffle_join:)/.test(d);
+  const known = /^(role_|g_|m_|go_|p_refresh|confirm_|raffle_join:)/.test(d);
   if (!known) {
     console.warn("unknown cb:", d);
     await ctx.answerCbQuery("⚠️ Geçersiz seçim").catch(()=>{});
@@ -277,4 +331,4 @@ bot.catch(async (err, ctx)=>{
 });
 
 bot.launch({ dropPendingUpdates: true });
-console.log("Bot: iç içe menüler + bekleme durumu + emojili başlıklar.");
+console.log("Bot: üyelik onayı (Evet/Hayır/Başa Dön) + nested menüler.");
