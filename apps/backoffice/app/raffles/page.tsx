@@ -1,75 +1,78 @@
 "use client";
 import { useEffect, useState } from "react";
 
-type R = { key: string; title: string; active: boolean };
+type Entry = {
+  id: number;
+  external_id: string;
+  created_at: string;
+  membership_id?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+  tg_username?: string | null;
+  submitted_username?: string | null;
+};
 
-export default function Raffles() {
-  const [rows, setRows] = useState<R[]>([]);
-  const [key, setKey] = useState("");
-  const [title, setTitle] = useState("");
-  const [active, setActive] = useState(true);
+export default function RafflePage() {
+  const [rows, setRows] = useState<Entry[]>([]);
   const [msg, setMsg] = useState("");
+  const [key, setKey] = useState("default_raffle");
 
-  const load = async () => {
-    setMsg("");
-    const r = await fetch("/api/admin/raffles/active");
+  async function load() {
+    setMsg("Yükleniyor...");
+    const r = await fetch(`/api/admin/raffle/entries?key=${encodeURIComponent(key)}`, {
+      cache: "no-store",
+    }).catch(() => null);
+    if (!r) { setMsg("Ağ hatası"); return; }
     const d = await r.json();
-    if (r.ok) setRows(d); else setMsg("Hata");
-  };
-
-  useEffect(()=>{ load(); }, []);
-
-  const createRaffle = async () => {
+    if (!r.ok) { setMsg(`Hata: ${d?.error || r.status}`); setRows([]); return; }
+    setRows(Array.isArray(d) ? d : []);
     setMsg("");
-    const r = await fetch("/api/admin/raffles", {
-      method: "POST",
-      headers: { "Content-Type":"application/json" },
-      body: JSON.stringify({ key, title, active })
-    });
-    setMsg(r.ok ? "Oluşturuldu" : "Hata veya mevcut");
-    setKey(""); setTitle(""); setActive(true);
-    load();
-  };
+  }
 
-  const toggle = async (rk: string, cur: boolean) => {
-    setMsg("");
-    const r = await fetch(`/api/admin/raffles/${rk}`, {
-      method: "PUT",
-      headers: { "Content-Type":"application/json" },
-      body: JSON.stringify({ active: !cur })
-    });
-    setMsg(r.ok ? "Güncellendi" : "Hata");
-    load();
-  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [key]);
 
   return (
     <div>
-      <h1>Özel Kampanyalar</h1>
-      <h3>Yeni Kampanya</h3>
-      <div style={{ display:"flex", gap:8 }}>
-        <input placeholder="key" value={key} onChange={e=>setKey(e.target.value)} />
-        <input placeholder="title" value={title} onChange={e=>setTitle(e.target.value)} />
-        <label style={{display:"flex",alignItems:"center",gap:6}}>
-          <input type="checkbox" checked={active} onChange={e=>setActive(e.target.checked)} /> aktif
-        </label>
-        <button onClick={createRaffle} disabled={!key || !title}>Oluştur</button>
+      <h1>Çekiliş Katılımcıları</h1>
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
+        <label>Raffle key:</label>
+        <input value={key} onChange={(e)=>setKey(e.target.value)} placeholder="default_raffle" />
+        <button onClick={load}>Yenile</button>
+        {msg && <span>{msg}</span>}
       </div>
 
-      <h3 style={{marginTop:16}}>Aktif Kampanyalar</h3>
       <table border={1} cellPadding={6} style={{ borderCollapse:"collapse", width:"100%" }}>
-        <thead><tr><th>Key</th><th>Başlık</th><th>Durum</th><th>İşlem</th></tr></thead>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Telegram ID</th>
+            <th>Ad</th>
+            <th>Soyad</th>
+            <th>Üyelik ID</th>
+            <th>@username</th>
+            <th>Yazdığı Kullanıcı Adı</th>
+            <th>Tarih</th>
+          </tr>
+        </thead>
         <tbody>
           {rows.map(r=>(
-            <tr key={r.key}>
-              <td>{r.key}</td>
-              <td>{r.title}</td>
-              <td>{r.active ? "aktif" : "pasif"}</td>
-              <td><button onClick={()=>toggle(r.key, r.active)}>{r.active ? "Pasifleştir" : "Aktifleştir"}</button></td>
+            <tr key={r.id}>
+              <td>{r.id}</td>
+              <td>{r.external_id}</td>
+              <td>{r.first_name || "-"}</td>
+              <td>{r.last_name || "-"}</td>
+              <td>{r.membership_id || "-"}</td>
+              <td>{r.tg_username ? `@${r.tg_username}` : "-"}</td>
+              <td>{r.submitted_username || "-"}</td>
+              <td>{new Date(r.created_at).toLocaleString()}</td>
             </tr>
           ))}
+          {!rows.length && (
+            <tr><td colSpan={8} style={{ textAlign:"center", color:"#667085" }}>Kayıt yok</td></tr>
+          )}
         </tbody>
       </table>
-      {msg && <div style={{marginTop:8}}>{msg}</div>}
     </div>
   );
 }
