@@ -18,7 +18,6 @@ const BOT_WRITE_SECRET = process.env.BOT_WRITE_SECRET || "";
 
 /* ---------------- DB INIT ---------------- */
 async function initDb() {
-  // Base create
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id BIGSERIAL PRIMARY KEY,
@@ -43,7 +42,7 @@ async function initDb() {
     );
   `);
 
-  // Eski şemalar için idempotent ALTER'lar
+  // Idempotent ALTER’lar (eski DB’leri yükseltmek için)
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name  TEXT;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS membership_id TEXT;`);
@@ -90,6 +89,7 @@ async function initDb() {
       active BOOLEAN NOT NULL DEFAULT TRUE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+
     CREATE TABLE IF NOT EXISTS raffle_entries (
       id BIGSERIAL PRIMARY KEY,
       raffle_key TEXT NOT NULL REFERENCES raffles(key) ON DELETE CASCADE,
@@ -123,7 +123,9 @@ async function initDb() {
       ('raffle_joined','Çekilişe katılımınız alındı. Bol şans!'),
       ('raffle_already','Zaten bu çekilişe katılmışsınız.')
     ON CONFLICT (key) DO NOTHING;
+  `);
 
+  await pool.query(`
     INSERT INTO raffles (key, title, active)
     VALUES ('default_raffle','Genel Çekiliş', true)
     ON CONFLICT (key) DO NOTHING;
@@ -208,6 +210,7 @@ app.post("/users", async (req, res) => {
   res.json(rows[0]);
 });
 
+// users list with status
 app.get("/users", async (_req, res) => {
   const q = `
     SELECT
@@ -231,6 +234,16 @@ app.get("/users", async (_req, res) => {
   `;
   const { rows } = await pool.query(q);
   res.json(rows);
+});
+
+// user by external id
+app.get("/users/by-external/:external_id", async (req, res) => {
+  const { rows } = await pool.query(
+    "SELECT id, external_id, first_name, last_name, membership_id FROM users WHERE external_id=$1 LIMIT 1",
+    [req.params.external_id]
+  );
+  if (!rows.length) return res.status(404).json({ error: "not_found" });
+  res.json(rows[0]);
 });
 
 /* ---------------- MEMBERS & PENDING ---------------- */
@@ -294,6 +307,7 @@ app.get("/admin/pending-requests", async (req, res) => {
   res.json(rows);
 });
 
+// approve/reject: membership_id varsa users'a yaz; ad/soyadı pending'den böl
 app.put("/admin/pending-requests/:id", async (req, res) => {
   if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
   const { action, notes } = req.body || {};
@@ -304,16 +318,22 @@ app.put("/admin/pending-requests/:id", async (req, res) => {
     await client.query("BEGIN");
     const { rows: cur } = await client.query("SELECT * FROM pending_verifications WHERE id=$1 FOR UPDATE", [req.params.id]);
     if (!cur.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "not_found" }); }
-    const pending = cur[0];
+    const p = cur[0];
 
     if (action === "approve") {
-      if (pending.provided_membership_id) {
+      let fn = null, ln = null;
+      if (p.full_name) {
+        const parts = String(p.full_name).trim().split(/\s+/);
+        fn = parts.shift() || null;
+        ln = parts.length ? parts.join(" ") : null;
+      }
+      if (p.provided_membership_id) {
         const { rows: mem } = await client.query(
           "SELECT first_name, last_name FROM members WHERE membership_id=$1",
-          [pending.provided_membership_id]
+          [p.provided_membership_id]
         );
-        const fn = mem[0]?.first_name || null;
-        const ln = mem[0]?.last_name || null;
+        const mfn = mem[0]?.first_name || fn;
+        const mln = mem[0]?.last_name  || ln;
         await client.query(
           `INSERT INTO users (external_id, first_name, last_name, membership_id)
            VALUES ($1,$2,$3,$4)
@@ -322,13 +342,17 @@ app.put("/admin/pending-requests/:id", async (req, res) => {
              first_name=COALESCE(EXCLUDED.first_name, users.first_name),
              last_name =COALESCE(EXCLUDED.last_name,  users.last_name),
              updated_at=now()`,
-          [pending.external_id, fn, ln, pending.provided_membership_id]
+          [p.external_id, mfn, mln, p.provided_membership_id]
         );
       } else {
         await client.query(
-          `INSERT INTO users (external_id)
-           VALUES ($1) ON CONFLICT (external_id) DO NOTHING`,
-          [pending.external_id]
+          `INSERT INTO users (external_id, first_name, last_name)
+           VALUES ($1,$2,$3)
+           ON CONFLICT (external_id) DO UPDATE SET
+             first_name=COALESCE(EXCLUDED.first_name, users.first_name),
+             last_name =COALESCE(EXCLUDED.last_name,  users.last_name),
+             updated_at=now()`,
+          [p.external_id, fn, ln]
         );
       }
 
@@ -344,7 +368,7 @@ app.put("/admin/pending-requests/:id", async (req, res) => {
     }
 
     await client.query("COMMIT");
-    res.json({ ok: true, external_id: pending.external_id });
+    res.json({ ok: true, external_id: p.external_id });
   } catch {
     await client.query("ROLLBACK");
     res.status(500).json({ error: "update_failed" });
