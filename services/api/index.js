@@ -47,7 +47,7 @@ async function initDb() {
     );
   `);
 
-  // Idempotent ALTER (schema uplift)
+  // schema uplift
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name  TEXT;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS membership_id TEXT;`);
@@ -153,7 +153,7 @@ app.get("/messages/:key", async (req, res) => {
   res.json(rows[0]);
 });
 
-// (opsiyonel debug) tüm mesajları listele
+// debug list
 app.get("/messages", async (_req, res) => {
   const { rows } = await pool.query(
     "SELECT key, content, image_url, file_id, updated_at FROM messages WHERE active=true ORDER BY key ASC"
@@ -174,32 +174,43 @@ app.put("/admin/messages/:key", async (req, res) => {
   const { content, image_url } = req.body || {};
   if (!content && !image_url) return res.status(400).json({ error: "no_changes" });
 
-  console.log("[PUT /admin/messages]", req.params.key); // debug log
+  console.log("[PUT /admin/messages]", req.params.key, { hasImage: Boolean(image_url) });
 
-  const q = `
-    INSERT INTO messages (key, content, image_url, active)
-    VALUES ($1, COALESCE($2,''), $3, true)
-    ON CONFLICT (key) DO UPDATE SET
-      content   = COALESCE($2, messages.content),
-      image_url = COALESCE($3, messages.image_url),
-      file_id   = CASE WHEN $3 IS NOT NULL AND $3 <> messages.image_url THEN NULL ELSE messages.file_id END,
-      updated_at= now()
-    RETURNING key, content, image_url, file_id, updated_at
-  `;
-  const { rows } = await pool.query(q, [req.params.key, content || null, image_url || null]);
+  try {
+    const q = `
+      INSERT INTO messages (key, content, image_url, active)
+      VALUES ($1, COALESCE($2,''), $3, true)
+      ON CONFLICT (key) DO UPDATE SET
+        content   = COALESCE($2, messages.content),
+        image_url = COALESCE($3, messages.image_url),
+        file_id   = CASE WHEN $3 IS NOT NULL AND $3 <> messages.image_url THEN NULL ELSE messages.file_id END,
+        updated_at= now()
+      RETURNING key, content, image_url, file_id, updated_at
+    `;
+    const { rows } = await pool.query(q, [req.params.key, content || null, image_url || null]);
 
-  if (BOT_INVALIDATE_URL && CACHE_SECRET) {
-    try {
-      await fetch(BOT_INVALIDATE_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-cache-secret": CACHE_SECRET },
-        body: JSON.stringify({ key: req.params.key })
-      });
-    } catch (e) {
-      console.warn("invalidate failed:", e?.message || e);
+    let invalidated = false;
+    if (BOT_INVALIDATE_URL && CACHE_SECRET) {
+      try {
+        const r = await fetch(BOT_INVALIDATE_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-cache-secret": CACHE_SECRET },
+          body: JSON.stringify({ key: req.params.key })
+        });
+        invalidated = r.ok;
+        if (!r.ok) console.warn("invalidate non-200:", r.status);
+      } catch (e) {
+        console.warn("invalidate failed:", e?.message || e);
+      }
+    } else {
+      console.warn("invalidate skipped: BOT_INVALIDATE_URL/CACHE_SECRET missing");
     }
+
+    return res.json({ ...rows[0], invalidated });
+  } catch (e) {
+    console.error("PUT /admin/messages error:", e);
+    return res.status(500).json({ error: "save_failed" });
   }
-  res.json(rows[0]);
 });
 
 app.put("/bot/messages/:key/file-id", async (req, res) => {
@@ -263,10 +274,7 @@ app.get("/users", async (_req, res) => {
       u.submitted_username,
       CASE
         WHEN u.membership_id IS NOT NULL THEN 'member'
-        WHEN EXISTS (
-          SELECT 1 FROM pending_verifications p
-          WHERE p.external_id = u.external_id AND p.status = 'pending'
-        ) THEN 'pending'
+        WHEN EXISTS (SELECT 1 FROM pending_verifications p WHERE p.external_id = u.external_id AND p.status = 'pending') THEN 'pending'
         ELSE 'guest'
       END AS status
     FROM users u
@@ -465,6 +473,12 @@ app.post("/raffle/enter", async (req, res) => {
   const { rows: r } = await pool.query("SELECT key FROM raffles WHERE key=$1 AND active=true", [key]);
   if (!r.length) return res.status(400).json({ error: "raffle_inactive" });
   try {
+    // users tablosunda kayıt yoksa create (bilgiler boş kalabilir)
+    await pool.query(
+      `INSERT INTO users (external_id) VALUES ($1)
+       ON CONFLICT (external_id) DO NOTHING`,
+      [String(external_id)]
+    );
     await pool.query("INSERT INTO raffle_entries (raffle_key, external_id) VALUES ($1,$2)", [key, String(external_id)]);
     return res.json({ joined: true });
   } catch {
@@ -477,7 +491,7 @@ app.get("/raffles/active", async (_req, res) => {
   res.json(rows);
 });
 
-// NEW: admin raffle entries (for backoffice list)
+// admin raffle entries – geniş alanlar
 app.get("/admin/raffle/entries", async (req, res) => {
   if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
   const key = (req.query.key || "default_raffle").toString();
@@ -488,6 +502,8 @@ app.get("/admin/raffle/entries", async (req, res) => {
             u.membership_id,
             u.first_name,
             u.last_name,
+            u.tg_first_name,
+            u.tg_last_name,
             u.tg_username,
             u.submitted_username
      FROM raffle_entries re
