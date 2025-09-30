@@ -46,17 +46,23 @@ async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
 
+    -- Tüm bot mesaj anahtarları (menü sabit, içerikler dinamik)
     INSERT INTO messages (key, content) VALUES
       ('welcome', 'Merhaba, hoş geldiniz!'),
       ('not_member', 'Devam için resmi kanala katılın.'),
-      ('events', 'Güncel etkinlik bulunamadı.')
+      ('events', 'Güncel etkinlik bulunamadı.'),
+      ('guest_become_member', 'Kayıt bağlantısı yakında.'),
+      ('guest_benefits', 'Ayrıcalıklar listesi yakında.'),
+      ('member_update_account', 'Hesap güncelleme yakında.'),
+      ('member_free_events', 'Şu an ücretsiz etkinlik yok.'),
+      ('member_personal_offers', 'Yakında sunulacak.')
     ON CONFLICT (key) DO NOTHING;
   `);
 }
 
 app.get("/", (_req, res) => res.json({ ok: true }));
 
-// Messages
+// Mesaj oku
 app.get("/messages/:key", async (req, res) => {
   const { rows } = await pool.query(
     "SELECT content, image_url FROM messages WHERE key = $1 AND active = true LIMIT 1",
@@ -66,7 +72,18 @@ app.get("/messages/:key", async (req, res) => {
   res.json(rows[0]);
 });
 
-// Admin update message
+// Admin: tüm mesajları listele
+app.get("/admin/messages", async (req, res) => {
+  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  const { rows } = await pool.query(
+    "SELECT key, content, image_url, updated_at FROM messages WHERE active = true ORDER BY key ASC"
+  );
+  res.json(rows);
+});
+
+// Admin: mesaj güncelle
 app.put("/admin/messages/:key", async (req, res) => {
   if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) {
     return res.status(401).json({ error: "unauthorized" });
@@ -85,7 +102,6 @@ app.put("/admin/messages/:key", async (req, res) => {
   `;
   const { rows } = await pool.query(q, [req.params.key, content || null, image_url || null]);
 
-  // Invalidate bot cache
   if (BOT_INVALIDATE_URL && CACHE_SECRET) {
     try {
       await fetch(BOT_INVALIDATE_URL, {
@@ -99,7 +115,7 @@ app.put("/admin/messages/:key", async (req, res) => {
   res.json(rows[0]);
 });
 
-// Users upsert
+// Users upsert + list
 app.post("/users", async (req, res) => {
   const { external_id, name, membership_id } = req.body || {};
   if (!external_id) return res.status(400).json({ error: "external_id required" });
@@ -117,7 +133,6 @@ app.post("/users", async (req, res) => {
   res.json(rows[0]);
 });
 
-// Users list
 app.get("/users", async (_req, res) => {
   const { rows } = await pool.query(
     "SELECT id, external_id, name, membership_id FROM users ORDER BY id DESC LIMIT 500"
