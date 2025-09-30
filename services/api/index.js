@@ -37,11 +37,18 @@ async function initDb() {
       key TEXT UNIQUE NOT NULL,
       content TEXT NOT NULL,
       image_url TEXT,
-      file_id TEXT,
       active BOOLEAN NOT NULL DEFAULT TRUE,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+  `);
 
+  /* Eski kurulumlarda eksik kolonları ekle (idempotent) */
+  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS file_id TEXT;`);
+  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS image_url TEXT;`);
+  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;`);
+  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();`);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS audit_logs (
       id BIGSERIAL PRIMARY KEY,
       user_id BIGINT REFERENCES users(id),
@@ -85,7 +92,9 @@ async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       UNIQUE (raffle_key, external_id)
     );
+  `);
 
+  await pool.query(`
     INSERT INTO messages (key, content) VALUES
       ('welcome','Merhaba, hoş geldiniz!'),
       ('not_member','Devam için resmi kanala katılın.'),
@@ -306,7 +315,6 @@ app.put("/admin/users/link", async (req, res) => {
 });
 
 /* ---------------- RAFFLES ---------------- */
-// join
 app.post("/raffle/enter", async (req, res) => {
   const { external_id, raffle_key } = req.body || {};
   const key = (raffle_key || "default_raffle").toString();
@@ -321,13 +329,11 @@ app.post("/raffle/enter", async (req, res) => {
   }
 });
 
-// aktif liste
 app.get("/raffles/active", async (_req, res) => {
   const { rows } = await pool.query("SELECT key, title FROM raffles WHERE active=true ORDER BY created_at DESC");
   res.json(rows);
 });
 
-// admin crud
 app.post("/admin/raffles", async (req, res) => {
   if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
   const { key, title, active } = req.body || {};
@@ -352,4 +358,6 @@ app.put("/admin/raffles/:key", async (req, res) => {
 });
 
 const port = process.env.PORT || 3000;
-initDb().then(() => app.listen(port, () => console.log(`API on :${port}`))).catch((e) => { console.error("DB init error", e); process.exit(1); });
+initDb()
+  .then(() => app.listen(port, () => console.log(`API on :${port}`)))
+  .catch((e) => { console.error("DB init error", e); process.exit(1); });
