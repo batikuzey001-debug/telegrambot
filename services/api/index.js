@@ -63,7 +63,7 @@ async function initDb() {
       external_id TEXT NOT NULL,
       provided_membership_id TEXT,
       full_name TEXT,
-      status TEXT NOT NULL DEFAULT 'pending',   -- pending|approved|rejected
+      status TEXT NOT NULL DEFAULT 'pending',
       notes TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -71,6 +71,22 @@ async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_verifications (status);
     CREATE INDEX IF NOT EXISTS idx_pending_external ON pending_verifications (external_id);
 
+    -- Çekiliş
+    CREATE TABLE IF NOT EXISTS raffles (
+      key TEXT PRIMARY KEY,                 -- kampanya anahtarı
+      title TEXT NOT NULL,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS raffle_entries (
+      id BIGSERIAL PRIMARY KEY,
+      raffle_key TEXT NOT NULL REFERENCES raffles(key) ON DELETE CASCADE,
+      external_id TEXT NOT NULL,           -- Telegram user id
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (raffle_key, external_id)
+    );
+
+    -- seed messages
     INSERT INTO messages (key, content) VALUES
       ('welcome','Merhaba, hoş geldiniz!'),
       ('not_member','Devam için resmi kanala katılın.'),
@@ -79,7 +95,14 @@ async function initDb() {
       ('guest_benefits','Ayrıcalıklar listesi yakında.'),
       ('member_update_account','Hesap güncelleme yakında.'),
       ('member_free_events','Şu an ücretsiz etkinlik yok.'),
-      ('member_personal_offers','Yakında sunulacak.')
+      ('member_personal_offers','Yakında sunulacak.'),
+      ('raffle_joined','Çekilişe katılımınız alındı. Bol şans!'),
+      ('raffle_already','Zaten bu çekilişe katılmışsınız.')
+    ON CONFLICT (key) DO NOTHING;
+
+    -- default raffle
+    INSERT INTO raffles (key, title, active)
+    VALUES ('default_raffle','Genel Çekiliş', true)
     ON CONFLICT (key) DO NOTHING;
   `);
 }
@@ -180,7 +203,6 @@ app.get("/members/:membership_id", async (req, res) => {
   res.json({ found: true, membership_id: m.membership_id, first_name: m.first_name, last_name: m.last_name });
 });
 
-// admin import (JSON rows)
 app.post("/admin/members/import", async (req, res) => {
   if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
   const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
@@ -210,7 +232,6 @@ app.post("/admin/members/import", async (req, res) => {
   }
 });
 
-// pending open
 app.post("/pending-requests", async (req, res) => {
   const { external_id, provided_membership_id, full_name, notes } = req.body || {};
   if (!external_id || !full_name) return res.status(400).json({ error: "external_id_and_full_name_required" });
@@ -232,7 +253,6 @@ app.get("/admin/pending-requests", async (req, res) => {
   res.json(rows);
 });
 
-// approve/reject
 app.put("/admin/pending-requests/:id", async (req, res) => {
   if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
   const { action, membership_id, notes } = req.body || {};
@@ -286,6 +306,44 @@ app.put("/admin/users/link", async (req, res) => {
     [String(external_id), String(membership_id), fn, ln]
   );
   res.json(rows[0]);
+});
+
+/* ---- Raffles ---- */
+// bot: çekilişe katıl
+app.post("/raffle/enter", async (req, res) => {
+  const { external_id, raffle_key } = req.body || {};
+  const key = (raffle_key || "default_raffle").toString();
+  if (!external_id) return res.status(400).json({ error: "external_id_required" });
+
+  // aktif mi?
+  const { rows: r } = await pool.query("SELECT key FROM raffles WHERE key=$1 AND active=true", [key]);
+  if (!r.length) return res.status(400).json({ error: "raffle_inactive" });
+
+  try {
+    await pool.query(
+      "INSERT INTO raffle_entries (raffle_key, external_id) VALUES ($1,$2)",
+      [key, String(external_id)]
+    );
+    return res.json({ joined: true });
+  } catch (e) {
+    // unique violation → zaten katılmış
+    return res.json({ joined: false, reason: "already" });
+  }
+});
+
+// admin: katılımcılar
+app.get("/admin/raffle/entries", async (req, res) => {
+  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
+  const key = (req.query.key || "default_raffle").toString();
+  const { rows } = await pool.query(
+    `SELECT re.id, re.external_id, re.created_at, u.membership_id, u.first_name, u.last_name
+     FROM raffle_entries re
+     LEFT JOIN users u ON u.external_id = re.external_id
+     WHERE re.raffle_key=$1
+     ORDER BY re.id DESC`,
+    [key]
+  );
+  res.json(rows);
 });
 
 const port = process.env.PORT || 3000;
