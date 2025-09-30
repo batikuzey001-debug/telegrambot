@@ -1,11 +1,14 @@
-import { Telegraf, Markup, session } from "telegraf";
+import { Telegraf, Markup } from "telegraf";
+import LocalSession from "telegraf-session-local";
 
 const { BOT_TOKEN, CHANNEL_USERNAME } = process.env;
 if (!BOT_TOKEN) throw new Error("BOT_TOKEN is required");
 if (!CHANNEL_USERNAME) throw new Error("CHANNEL_USERNAME is required"); // Örn: @resmikanal
 
 const bot = new Telegraf(BOT_TOKEN);
-bot.use(session()); // Neden: Üyelik ID girişinde kısa süreli durum tutmak için.
+
+// Session middleware (dosyaya kaydeder, Railway’de ephemeral disk; yine de çalışır)
+bot.use(new LocalSession({ database: "session_db.json" }).middleware());
 
 const joinKeyboard = Markup.inlineKeyboard([
   Markup.button.url("Kanala Katıl", `https://t.me/${CHANNEL_USERNAME.replace("@", "")}`),
@@ -32,7 +35,6 @@ async function isChannelMember(ctx) {
     const member = await ctx.telegram.getChatMember(CHANNEL_USERNAME, id);
     return ["creator", "administrator", "member"].includes(member.status);
   } catch {
-    // Neden: Kanal gizli/erişim kısıtlı olabilir; kullanıcı muhtemelen üye değildir.
     return false;
   }
 }
@@ -49,7 +51,7 @@ async function gateOrProceed(ctx) {
 bot.start(async (ctx) => {
   const ok = await gateOrProceed(ctx);
   if (!ok) return;
-  if (ctx.session?.membershipId) {
+  if (ctx.session.membershipId) {
     await ctx.reply("Hoş geldiniz. Üyelik menüsü:", memberMenu);
   } else {
     await ctx.reply("Lütfen bir seçenek seçin:", roleMenu);
@@ -59,7 +61,7 @@ bot.start(async (ctx) => {
 bot.hears(["Merhaba", "merhaba", "Start", "start"], async (ctx) => {
   const ok = await gateOrProceed(ctx);
   if (!ok) return;
-  if (ctx.session?.membershipId) {
+  if (ctx.session.membershipId) {
     await ctx.reply("Hoş geldiniz. Üyelik menüsü:", memberMenu);
   } else {
     await ctx.reply("Lütfen bir seçenek seçin:", roleMenu);
@@ -74,16 +76,10 @@ bot.action("verify_join", async (ctx) => {
   await ctx.reply("Lütfen bir seçenek seçin:", roleMenu);
 });
 
-bot.command("kontrol", async (ctx) => {
-  const ok = await isChannelMember(ctx);
-  await ctx.reply(ok ? "Üyelik doğrulandı." : "Hâlâ üye görünmüyor.", ok ? undefined : joinKeyboard);
-});
-
-// Rol seçimi
 bot.hears("RadissonBet Üyesiyim", async (ctx) => {
   const ok = await gateOrProceed(ctx);
   if (!ok) return;
-  ctx.session.awaitingMembershipId = true; // Neden: Sıradaki mesajın ID olduğunu anlamak için.
+  ctx.session.awaitingMembershipId = true;
   await ctx.reply("Üyelik ID’nizi yazın:");
 });
 
@@ -93,19 +89,18 @@ bot.hears("Misafirim", async (ctx) => {
   await ctx.reply("Misafir menüsü:", guestMenu);
 });
 
-// Üyelik ID yakalama
 bot.on("text", async (ctx) => {
-  if (!ctx.session?.awaitingMembershipId) return;
-  const idText = ctx.message.text?.trim();
-  if (!idText) return;
-
-  ctx.session.membershipId = idText;        // Geçici. Sonraki adım: DB'ye kalıcı kaydet.
-  ctx.session.awaitingMembershipId = false;
-
-  await ctx.reply("Üyelik ID’niz kaydedildi. Üyelik menüsü:", memberMenu);
+  if (ctx.session.awaitingMembershipId) {
+    const idText = ctx.message.text?.trim();
+    if (idText) {
+      ctx.session.membershipId = idText;
+      ctx.session.awaitingMembershipId = false;
+      await ctx.reply("Üyelik ID’niz kaydedildi. Üyelik menüsü:", memberMenu);
+    }
+  }
 });
 
-// Üye menüsü cevapları (dummy)
+// Üye menüsü (dummy)
 bot.hears("Hesap Bilgilerimi Güncelle", (ctx) =>
   ctx.reply("Hesap güncelleme yakında aktif olacak.")
 );
@@ -116,7 +111,7 @@ bot.hears("Bana Özel Etkinlikler ve Fırsatlar", (ctx) =>
   ctx.reply("Size özel fırsatlar yakında sunulacak.")
 );
 
-// Misafir menüsü cevapları (dummy)
+// Misafir menüsü (dummy)
 bot.hears("RadissonBet üyesi olmak istiyorum", (ctx) =>
   ctx.reply("Kayıt bağlantısı yakında eklenecek.")
 );
