@@ -1,612 +1,300 @@
-// services/api/index.js
+// services/bot/index.js
+import { Telegraf, Markup } from "telegraf";
+import axios from "axios";
+import http from "http";
+import https from "https";
 import express from "express";
-import pkg from "pg";
-import fetch from "node-fetch";
 
-const { Pool } = pkg;
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false
+const {
+  BOT_TOKEN, CHANNEL_USERNAME, APP_URL,
+  CACHE_TTL_MS, BOT_WRITE_SECRET,
+  SOCIAL_URL, SIGNUP_URL, ADMIN_NOTIFY_SECRET,
+  CACHE_SECRET, PORT
+} = process.env;
+
+if (!BOT_TOKEN || !CHANNEL_USERNAME || !APP_URL) throw new Error("missing env");
+
+const TTL = Number(CACHE_TTL_MS || 60000);
+
+// --- API client
+const api = axios.create({
+  baseURL: APP_URL, timeout: 3000,
+  httpAgent: new http.Agent({ keepAlive: true }),
+  httpsAgent: new https.Agent({ keepAlive: true })
 });
 
+// --- Bot
+const bot = new Telegraf(BOT_TOKEN);
+
+// --- SINGLE Express app (notify + invalidate)
 const app = express();
 app.use(express.json());
 
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
-const BOT_INVALIDATE_URL = process.env.BOT_INVALIDATE_URL || "";
-const CACHE_SECRET = process.env.CACHE_SECRET || "";
-const BOT_WRITE_SECRET = process.env.BOT_WRITE_SECRET || "";
+app.post("/admin/notify", async (req, res) => {
+  if ((req.headers["x-admin-secret"] || "") !== (ADMIN_NOTIFY_SECRET || "")) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  const { external_id, text } = req.body || {};
+  if (!external_id || !text) return res.status(400).json({ error: "required" });
+  try {
+    await bot.telegram.sendMessage(String(external_id), text, { parse_mode: "HTML" });
+    return res.json({ ok: true });
+  } catch {
+    return res.status(500).json({ error: "send_failed" });
+  }
+});
 
-/* ---------------- DB INIT ---------------- */
-async function initDb() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      id BIGSERIAL PRIMARY KEY,
-      external_id TEXT UNIQUE NOT NULL,
-      name TEXT,
-      first_name TEXT,
-      last_name  TEXT,
-      membership_id TEXT,
-      tg_first_name TEXT,
-      tg_last_name  TEXT,
-      tg_username   TEXT,
-      submitted_username TEXT,
-      preferences JSONB DEFAULT '{}'::jsonb,
-      bonus JSONB DEFAULT '{}'::jsonb,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
+// cache store
+const cache = new Map(); // key -> {value,exp}
+const getCached = (k)=>{ const it = cache.get(k); return it && it.exp>Date.now()? it.value : null; };
+const setCached = (k,v,ttl=TTL)=> cache.set(k,{ value:v, exp:Date.now()+ttl });
 
-    CREATE TABLE IF NOT EXISTS messages (
-      id BIGSERIAL PRIMARY KEY,
-      key TEXT UNIQUE NOT NULL,
-      content TEXT NOT NULL,
-      image_url TEXT,
-      active BOOLEAN NOT NULL DEFAULT TRUE,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-  `);
+// invalidate endpoint (fixes 502)
+app.post("/invalidate", (req, res) => {
+  if ((req.headers["x-cache-secret"] || "") !== (CACHE_SECRET || "")) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  const { key } = req.body || {};
+  if (key) cache.delete(String(key));
+  else cache.clear();
+  return res.json({ ok: true, key: key || "*", size: cache.size });
+});
 
-  // schema uplift
-  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT;`);
-  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name  TEXT;`);
-  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS membership_id TEXT;`);
-  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_first_name TEXT;`);
-  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_last_name  TEXT;`);
-  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_username   TEXT;`);
-  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS submitted_username TEXT;`);
+const httpPort = Number(PORT || 3001);
+app.listen(httpPort, () => console.log(`bot http on :${httpPort}`));
 
-  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS file_id TEXT;`);
-  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS image_url TEXT;`);
-  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;`);
-  await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();`);
+// helpers
+async function fetchMessage(key){ const { data } = await api.get(`/messages/${key}`); setCached(key,data); return data; }
+async function getMessage(key){ const c=getCached(key); if(c){ fetchMessage(key).catch(()=>{}); return c; } try{ return await fetchMessage(key);}catch{ return { content:"İçerik bulunamadı.", image_url:null, file_id:null }; } }
+async function sendMessageByKey(ctx, key, extra){
+  const msg = await getMessage(key);
+  if (msg.file_id) return ctx.replyWithPhoto(msg.file_id, { caption: msg.content, ...extra });
+  if (msg.image_url) {
+    try {
+      const r = await axios.get(msg.image_url, { responseType:"arraybuffer", timeout:4000, maxRedirects:4 });
+      const sent = await ctx.replyWithPhoto({ source:Buffer.from(r.data), filename:"image" }, { caption: msg.content, ...extra });
+      if (sent?.photo?.length && BOT_WRITE_SECRET) {
+        const fid = sent.photo[sent.photo.length-1].file_id;
+        await api.put(`/bot/messages/${key}/file-id`, { file_id: fid }, { headers:{ "x-bot-secret": BOT_WRITE_SECRET } });
+        setCached(key, { ...msg, file_id: fid });
+      }
+      return sent;
+    } catch { /* fallback */ }
+  }
+  return ctx.reply(msg.content, extra);
+}
+async function isChannelMember(ctx){ try{ const m=await ctx.telegram.getChatMember(CHANNEL_USERNAME,ctx.from.id); return ["creator","administrator","member"].includes(m.status);}catch{ return false; } }
+async function getStatus(ext){ try{ const { data } = await api.get(`/users/status/${ext}`); return data; }catch{ return { stage:"guest" }; } }
 
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS audit_logs (
-      id BIGSERIAL PRIMARY KEY,
-      user_id BIGINT REFERENCES users(id),
-      action TEXT NOT NULL,
-      meta JSONB DEFAULT '{}'::jsonb,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
+// keyboards
+const KB = {
+  ROOT: Markup.inlineKeyboard([
+    [Markup.button.callback("👤 RadissonBet Üyesiyim","role_member")],
+    [Markup.button.callback("🙋‍♂️ Misafirim","role_guest")]
+  ]),
+  MEMBER: Markup.inlineKeyboard([
+    [Markup.button.callback("🧾 Hesap Bilgilerim","m_account")],
+    [Markup.button.callback("🎁 Ücretsiz Etkinlikler","m_free")],
+    [Markup.button.callback("⭐ Bana Özel Fırsatlar","m_offers")],
+    [Markup.button.callback("📢 Özel Kampanyalar","m_campaigns")],
+    [Markup.button.callback("🎟️ Çekilişe Katıl","m_raffle")],
+    [Markup.button.callback("🏠 Ana Menü","go_root")]
+  ]),
+  GUEST: Markup.inlineKeyboard([
+    [Markup.button.callback("📝 Üye Ol","g_signup")],
+    [Markup.button.callback("🏅 Radisson Ayrıcalıkları","g_benefits")],
+    [Markup.button.callback("📅 Etkinlikler ve Fırsatlar","g_events")],
+    [Markup.button.callback("📢 Özel Kampanyalar","g_campaigns")],
+    [Markup.button.callback("🏠 Ana Menü","go_root")]
+  ]),
+  PENDING: Markup.inlineKeyboard([
+    [Markup.button.callback("🔄 Durumu Yenile","p_refresh")],
+    [Markup.button.callback("🏠 Ana Menü","go_root")]
+  ]),
+  JOIN: Markup.inlineKeyboard([
+    Markup.button.url("🔗 Kanala Katıl", `https://t.me/${CHANNEL_USERNAME.replace("@","")}`),
+    Markup.button.callback("✅ Kontrol Et", "verify_join")
+  ])
+};
 
-    CREATE TABLE IF NOT EXISTS members (
-      membership_id TEXT PRIMARY KEY,
-      first_name TEXT NOT NULL,
-      last_name  TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-    CREATE INDEX IF NOT EXISTS idx_membership_id ON members (membership_id);
+// light state + debounce
+const state = new Map(); const S = (uid)=>{ if(!state.has(uid)) state.set(uid,{ stage:"ROOT" }); return state.get(uid); };
+const lastStart = new Map();
 
-    CREATE TABLE IF NOT EXISTS pending_verifications (
-      id BIGSERIAL PRIMARY KEY,
-      external_id TEXT NOT NULL,
-      provided_membership_id TEXT,
-      full_name TEXT,
-      status TEXT NOT NULL DEFAULT 'pending',
-      notes TEXT,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-    CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_verifications (status);
-    CREATE INDEX IF NOT EXISTS idx_pending_external ON pending_verifications (external_id);
-
-    CREATE TABLE IF NOT EXISTS raffles (
-      key TEXT PRIMARY KEY,
-      title TEXT NOT NULL,
-      active BOOLEAN NOT NULL DEFAULT TRUE,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-
-    CREATE TABLE IF NOT EXISTS raffle_entries (
-      id BIGSERIAL PRIMARY KEY,
-      raffle_key TEXT NOT NULL REFERENCES raffles(key) ON DELETE CASCADE,
-      external_id TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      UNIQUE (raffle_key, external_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS notification_templates (
-      id BIGSERIAL PRIMARY KEY,
-      key TEXT UNIQUE NOT NULL,
-      title TEXT NOT NULL,
-      content TEXT NOT NULL,
-      image_url TEXT,
-      buttons JSONB DEFAULT '[]'::jsonb,
-      active BOOLEAN NOT NULL DEFAULT TRUE,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-  `);
-
-  await pool.query(`
-    INSERT INTO messages (key, content) VALUES
-      ('welcome','Merhaba, hoş geldiniz!'),
-      ('not_member','Devam için resmi kanala katılın.'),
-      ('events','Güncel etkinlik bulunamadı.'),
-      ('guest_become_member','Kayıt bağlantısı yakında.'),
-      ('guest_benefits','Ayrıcalıklar listesi yakında.'),
-      ('member_update_account','Hesap güncelleme yakında.'),
-      ('member_free_events','Şu an ücretsiz etkinlik yok.'),
-      ('member_personal_offers','Yakında sunulacak.'),
-      ('raffle_joined','Çekilişe katılımınız alındı. Bol şans!'),
-      ('raffle_already','Zaten bu çekilişe katılmışsınız.')
-    ON CONFLICT (key) DO NOTHING;
-  `);
-
-  await pool.query(`
-    INSERT INTO raffles (key, title, active)
-    VALUES ('default_raffle','Genel Çekiliş', true)
-    ON CONFLICT (key) DO NOTHING;
-  `);
+// render + router
+const showRoot   = (ctx)=> ctx.reply("👇 Lütfen bir seçenek seçin:", KB.ROOT);
+const showMember = (ctx,n)=> ctx.reply(n?`👋 Merhaba ${n}\n🧭 Üyelik menüsü:`:"🧭 Üyelik menüsü:", KB.MEMBER);
+const showGuest  = (ctx)=> ctx.reply("🧭 Misafir menüsü:", KB.GUEST);
+const showPend   = (ctx)=> ctx.reply("⏳ Başvurunuz inceleniyor. Onaylanınca üyelik ana sayfanız açılacak.", KB.PENDING);
+async function routeHome(ctx){
+  const st = await getStatus(String(ctx.from.id));
+  if (st.stage === "member") return showMember(ctx,[st.user?.first_name,st.user?.last_name].filter(Boolean).join(" "));
+  if (st.stage === "pending") return showPend(ctx);
+  return showRoot(ctx);
 }
 
-app.get("/", (_req, res) => res.json({ ok: true }));
+// start (debounced)
+bot.start(async (ctx)=>{
+  const now=Date.now(), prev=lastStart.get(ctx.from.id)||0;
+  if (now-prev<1500) return;
+  lastStart.set(ctx.from.id, now);
 
-/* ---------------- MESSAGES ---------------- */
-app.get("/messages/:key", async (req, res) => {
-  const { rows } = await pool.query(
-    "SELECT content, image_url, file_id FROM messages WHERE key=$1 AND active=true LIMIT 1",
-    [req.params.key]
-  );
-  if (!rows.length) return res.status(404).json({ error: "not_found" });
-  res.json(rows[0]);
+  await sendMessageByKey(ctx,"welcome");
+  const ok = await isChannelMember(ctx);
+  if (!ok) return sendMessageByKey(ctx,"not_member",KB.JOIN);
+  return routeHome(ctx);
 });
 
-// debug list
-app.get("/messages", async (_req, res) => {
-  const { rows } = await pool.query(
-    "SELECT key, content, image_url, file_id, updated_at FROM messages WHERE active=true ORDER BY key ASC"
-  );
-  res.json(rows);
+// verify join
+bot.action("verify_join", async (ctx)=>{
+  const ok = await isChannelMember(ctx);
+  await ctx.answerCbQuery(ok?"✅ Doğrulandı":"⛔ Üye görünmüyor");
+  if (!ok) return;
+  try{ await ctx.editMessageText("✅ Teşekkürler. Devam edebilirsiniz."); }catch{}
+  return routeHome(ctx);
 });
 
-app.get("/admin/messages", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
-  const { rows } = await pool.query(
-    "SELECT key, content, image_url, file_id, updated_at FROM messages WHERE active=true ORDER BY key ASC"
-  );
-  res.json(rows);
+// go root
+bot.action("go_root", (ctx)=> routeHome(ctx));
+
+// registration guarded
+bot.action("role_member", async (ctx)=>{
+  const st = await getStatus(String(ctx.from.id));
+  if (st.stage === "member") return showMember(ctx,[st.user?.first_name,st.user?.last_name].filter(Boolean).join(" "));
+  if (st.stage === "pending") return showPend(ctx);
+  const s=S(ctx.from.id); s.newUser={ username:null, id:null }; s.awaiting="username";
+  await ctx.reply("🧾 RadissonBet kullanıcı adınız nedir?");
 });
 
-app.put("/admin/messages/:key", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
-  const { content, image_url } = req.body || {};
-  if (!content && !image_url) return res.status(400).json({ error: "no_changes" });
+bot.on("text", async (ctx)=>{
+  const st = await getStatus(String(ctx.from.id));
+  if (st.stage === "member") return showMember(ctx,[st.user?.first_name,st.user?.last_name].filter(Boolean).join(" "));
+  if (st.stage === "pending") return showPend(ctx);
 
-  console.log("[PUT /admin/messages]", req.params.key, { hasImage: Boolean(image_url) });
+  const s=S(ctx.from.id);
+  const text=(ctx.message.text||"").trim();
 
-  try {
-    const q = `
-      INSERT INTO messages (key, content, image_url, active)
-      VALUES ($1, COALESCE($2,''), $3, true)
-      ON CONFLICT (key) DO UPDATE SET
-        content   = COALESCE($2, messages.content),
-        image_url = COALESCE($3, messages.image_url),
-        file_id   = CASE WHEN $3 IS NOT NULL AND $3 <> messages.image_url THEN NULL ELSE messages.file_id END,
-        updated_at= now()
-      RETURNING key, content, image_url, file_id, updated_at
-    `;
-    const { rows } = await pool.query(q, [req.params.key, content || null, image_url || null]);
-
-    let invalidated = false;
-    if (BOT_INVALIDATE_URL && CACHE_SECRET) {
-      try {
-        const r = await fetch(BOT_INVALIDATE_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "x-cache-secret": CACHE_SECRET },
-          body: JSON.stringify({ key: req.params.key })
-        });
-        invalidated = r.ok;
-        if (!r.ok) console.warn("invalidate non-200:", r.status);
-      } catch (e) {
-        console.warn("invalidate failed:", e?.message || e);
-      }
-    } else {
-      console.warn("invalidate skipped: BOT_INVALIDATE_URL/CACHE_SECRET missing");
-    }
-
-    return res.json({ ...rows[0], invalidated });
-  } catch (e) {
-    console.error("PUT /admin/messages error:", e);
-    return res.status(500).json({ error: "save_failed" });
+  if (s.awaiting==="username"){
+    if (!text || text.length<2) return ctx.reply("⚠️ Geçerli bir kullanıcı adı yazın.");
+    s.newUser={ ...(s.newUser||{}), username:text }; s.awaiting="membership";
+    return ctx.reply("🔢 Üyelik numaranızı girin (sadece rakam):");
   }
-});
 
-app.put("/bot/messages/:key/file-id", async (req, res) => {
-  if ((req.headers["x-bot-secret"] || "") !== BOT_WRITE_SECRET) return res.status(401).json({ error: "unauthorized" });
-  const { file_id } = req.body || {};
-  if (!file_id) return res.status(400).json({ error: "file_id_required" });
-  const { rows } = await pool.query(
-    "UPDATE messages SET file_id=$1, updated_at=now() WHERE key=$2 RETURNING key, file_id",
-    [file_id, req.params.key]
-  );
-  if (!rows.length) return res.status(404).json({ error: "not_found" });
-  res.json(rows[0]);
-});
-
-/* ---------------- USERS ---------------- */
-app.post("/users", async (req, res) => {
-  const {
-    external_id, name, first_name, last_name, membership_id,
-    tg_first_name, tg_last_name, tg_username, submitted_username
-  } = req.body || {};
-  if (!external_id) return res.status(400).json({ error: "external_id required" });
-
-  const q = `
-    INSERT INTO users (
-      external_id, name, first_name, last_name, membership_id,
-      tg_first_name, tg_last_name, tg_username, submitted_username
-    )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-    ON CONFLICT (external_id) DO UPDATE SET
-      name                = COALESCE(EXCLUDED.name, users.name),
-      first_name          = COALESCE(EXCLUDED.first_name, users.first_name),
-      last_name           = COALESCE(EXCLUDED.last_name, users.last_name),
-      membership_id       = COALESCE(EXCLUDED.membership_id, users.membership_id),
-      tg_first_name       = COALESCE(EXCLUDED.tg_first_name, users.tg_first_name),
-      tg_last_name        = COALESCE(EXCLUDED.tg_last_name,  users.tg_last_name),
-      tg_username         = COALESCE(EXCLUDED.tg_username,   users.tg_username),
-      submitted_username  = COALESCE(EXCLUDED.submitted_username, users.submitted_username),
-      updated_at          = now()
-    RETURNING id, external_id, name, first_name, last_name, membership_id,
-              tg_first_name, tg_last_name, tg_username, submitted_username
-  `;
-  const { rows } = await pool.query(q, [
-    external_id, name || null, first_name || null, last_name || null, membership_id || null,
-    tg_first_name || null, tg_last_name || null, tg_username || null, submitted_username || null
-  ]);
-  res.json(rows[0]);
-});
-
-app.get("/users", async (_req, res) => {
-  const q = `
-    SELECT
-      u.id,
-      u.external_id,
-      u.name,
-      u.first_name,
-      u.last_name,
-      u.membership_id,
-      u.tg_first_name,
-      u.tg_last_name,
-      u.tg_username,
-      u.submitted_username,
-      CASE
-        WHEN u.membership_id IS NOT NULL THEN 'member'
-        WHEN EXISTS (SELECT 1 FROM pending_verifications p WHERE p.external_id = u.external_id AND p.status = 'pending') THEN 'pending'
-        ELSE 'guest'
-      END AS status
-    FROM users u
-    ORDER BY u.id DESC
-    LIMIT 1000
-  `;
-  const { rows } = await pool.query(q);
-  res.json(rows);
-});
-
-app.get("/users/by-external/:external_id", async (req, res) => {
-  const { rows } = await pool.query(
-    "SELECT id, external_id, first_name, last_name, membership_id FROM users WHERE external_id=$1 LIMIT 1",
-    [req.params.external_id]
-  );
-  if (!rows.length) return res.status(404).json({ error: "not_found" });
-  res.json(rows[0]);
-});
-
-app.get("/users/status/:external_id", async (req, res) => {
-  const ext = String(req.params.external_id);
-  const ures = await pool.query(
-    "SELECT id, external_id, first_name, last_name, membership_id FROM users WHERE external_id=$1 LIMIT 1",
-    [ext]
-  );
-  const user = ures.rows[0] || null;
-  const pres = await pool.query(
-    "SELECT id, provided_membership_id, full_name, status, created_at FROM pending_verifications WHERE external_id=$1 AND status='pending' ORDER BY id DESC LIMIT 1",
-    [ext]
-  );
-  const pending = pres.rows[0] || null;
-
-  let stage = "guest";
-  if (user?.membership_id) stage = "member";
-  else if (pending) stage = "pending";
-
-  res.json({ stage, user, pending });
-});
-
-/* ---------------- MEMBERS & PENDING ---------------- */
-app.get("/members/:membership_id", async (req, res) => {
-  const { rows } = await pool.query(
-    "SELECT membership_id, first_name, last_name FROM members WHERE membership_id=$1 LIMIT 1",
-    [req.params.membership_id]
-  );
-  if (!rows.length) return res.json({ found: false });
-  const m = rows[0];
-  res.json({ found: true, membership_id: m.membership_id, first_name: m.first_name, last_name: m.last_name });
-});
-
-app.post("/admin/members/import", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
-  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
-  if (!rows.length) return res.status(400).json({ error: "empty" });
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    for (const r of rows) {
-      if (!r.membership_id || !r.first_name || !r.last_name) continue;
-      await client.query(
-        `INSERT INTO members (membership_id, first_name, last_name)
-         VALUES ($1,$2,$3)
-         ON CONFLICT (membership_id) DO UPDATE SET
-           first_name=EXCLUDED.first_name,
-           last_name=EXCLUDED.last_name,
-           updated_at=now()`,
-        [String(r.membership_id), String(r.first_name), String(r.last_name)]
-      );
-    }
-    await client.query("COMMIT");
-    res.json({ ok: true, count: rows.length });
-  } catch {
-    await client.query("ROLLBACK");
-    res.status(500).json({ error: "import_failed" });
-  } finally {
-    client.release();
-  }
-});
-
-app.post("/pending-requests", async (req, res) => {
-  const { external_id, provided_membership_id, full_name, notes } = req.body || {};
-  if (!external_id || !full_name) return res.status(400).json({ error: "external_id_and_full_name_required" });
-  const { rows } = await pool.query(
-    `INSERT INTO pending_verifications (external_id, provided_membership_id, full_name, notes)
-     VALUES ($1,$2,$3,$4) RETURNING id, status`,
-    [String(external_id), provided_membership_id || null, String(full_name), notes || null]
-  );
-  res.json(rows[0]);
-});
-
-app.get("/admin/pending-requests", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
-  const status = (req.query.status || "pending").toString();
-  const { rows } = await pool.query(
-    "SELECT id, external_id, provided_membership_id, full_name, status, notes, created_at FROM pending_verifications WHERE status=$1 ORDER BY id DESC",
-    [status]
-  );
-  res.json(rows);
-});
-
-app.put("/admin/pending-requests/:id", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
-  const { action, notes } = req.body || {};
-  if (!["approve", "reject"].includes(action)) return res.status(400).json({ error: "invalid_action" });
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const { rows: cur } = await client.query("SELECT * FROM pending_verifications WHERE id=$1 FOR UPDATE", [req.params.id]);
-    if (!cur.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "not_found" }); }
-    const p = cur[0];
-
-    if (action === "approve") {
-      let fn = null, ln = null;
-      if (p.full_name) {
-        const parts = String(p.full_name).trim().split(/\s+/);
-        fn = parts.shift() || null;
-        ln = parts.length ? parts.join(" ") : null;
-      }
-      if (p.provided_membership_id) {
-        const { rows: mem } = await client.query(
-          "SELECT first_name, last_name FROM members WHERE membership_id=$1",
-          [p.provided_membership_id]
-        );
-        const mfn = mem[0]?.first_name || fn;
-        const mln = mem[0]?.last_name  || ln;
-        await client.query(
-          `INSERT INTO users (external_id, first_name, last_name, membership_id)
-           VALUES ($1,$2,$3,$4)
-           ON CONFLICT (external_id) DO UPDATE SET
-             membership_id=EXCLUDED.membership_id,
-             first_name=COALESCE(EXCLUDED.first_name, users.first_name),
-             last_name =COALESCE(EXCLUDED.last_name,  users.last_name),
-             updated_at=now()`,
-          [p.external_id, mfn, mln, p.provided_membership_id]
-        );
-      } else {
-        await client.query(
-          `INSERT INTO users (external_id, first_name, last_name)
-           VALUES ($1,$2,$3)
-           ON CONFLICT (external_id) DO UPDATE SET
-             first_name=COALESCE(EXCLUDED.first_name, users.first_name),
-             last_name =COALESCE(EXCLUDED.last_name,  users.last_name),
-             updated_at=now()`,
-          [p.external_id, fn, ln]
-        );
-      }
-
-      await client.query(
-        "UPDATE pending_verifications SET status='approved', notes=$2, updated_at=now() WHERE id=$1",
-        [req.params.id, notes || null]
-      );
-    } else {
-      await client.query(
-        "UPDATE pending_verifications SET status='rejected', notes=$2, updated_at=now() WHERE id=$1",
-        [req.params.id, notes || null]
-      );
-    }
-
-    await client.query("COMMIT");
-    res.json({ ok: true, external_id: p.external_id });
-  } catch {
-    await client.query("ROLLBACK");
-    res.status(500).json({ error: "update_failed" });
-  } finally {
-    client.release();
-  }
-});
-
-app.put("/admin/users/link", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
-  const { external_id, membership_id } = req.body || {};
-  if (!external_id || !membership_id) return res.status(400).json({ error: "required" });
-  const { rows: mem } = await pool.query("SELECT first_name, last_name FROM members WHERE membership_id=$1", [membership_id]);
-  const fn = mem[0]?.first_name || null;
-  const ln = mem[0]?.last_name || null;
-  const { rows } = await pool.query(
-    `INSERT INTO users (external_id, membership_id, first_name, last_name)
-     VALUES ($1,$2,$3,$4)
-     ON CONFLICT (external_id) DO UPDATE SET
-       membership_id=EXCLUDED.membership_id,
-       first_name=COALESCE(EXCLUDED.first_name, users.first_name),
-       last_name =COALESCE(EXCLUDED.last_name, users.last_name),
-       updated_at=now()
-     RETURNING id, external_id, membership_id, first_name, last_name`,
-    [String(external_id), String(membership_id), fn, ln]
-  );
-  res.json(rows[0]);
-});
-
-/* ---------------- RAFFLES ---------------- */
-app.post("/raffle/enter", async (req, res) => {
-  const { external_id, raffle_key } = req.body || {};
-  const key = (raffle_key || "default_raffle").toString();
-  if (!external_id) return res.status(400).json({ error: "external_id_required" });
-  const { rows: r } = await pool.query("SELECT key FROM raffles WHERE key=$1 AND active=true", [key]);
-  if (!r.length) return res.status(400).json({ error: "raffle_inactive" });
-  try {
-    // users tablosunda kayıt yoksa create (bilgiler boş kalabilir)
-    await pool.query(
-      `INSERT INTO users (external_id) VALUES ($1)
-       ON CONFLICT (external_id) DO NOTHING`,
-      [String(external_id)]
+  if (s.awaiting==="membership"){
+    if (!/^[0-9]+$/.test(text)) return ctx.reply("⚠️ Geçersiz numara. Sadece rakam girin.");
+    s.newUser={ ...(s.newUser||{}), id:text };
+    const kb=Markup.inlineKeyboard([
+      [Markup.button.callback("✅ Evet","confirm_yes"), Markup.button.callback("❌ Hayır","confirm_no")],
+      [Markup.button.callback("🔙 Başa Dön","confirm_restart")]
+    ]);
+    return ctx.reply(
+      `🧩 Bilgilerini Onayla\n~~~~~~~~~~~~~~~~~~~~\n👤 Kullanıcı adı: ${s.newUser.username}\n🪪 Üyelik numarası: ${s.newUser.id}\n~~~~~~~~~~~~~~~~~~~~\n👉 Doğruysa “Evet”, düzeltmek için “Hayır”.\n↩️ Baştan girmek için “Başa Dön”.`,
+      kb
     );
-    await pool.query("INSERT INTO raffle_entries (raffle_key, external_id) VALUES ($1,$2)", [key, String(external_id)]);
-    return res.json({ joined: true });
-  } catch {
-    return res.json({ joined: false, reason: "already" });
   }
 });
 
-app.get("/raffles/active", async (_req, res) => {
-  const { rows } = await pool.query("SELECT key, title FROM raffles WHERE active=true ORDER BY created_at DESC");
-  res.json(rows);
-});
+bot.action("confirm_restart", async (ctx)=>{ const s=S(ctx.from.id); s.newUser={username:null,id:null}; s.awaiting="username"; try{ await ctx.editMessageText("🔄 Baştan alalım. Kullanıcı adınızı yazın:"); }catch{}; });
+bot.action("confirm_no", async (ctx)=>{ const s=S(ctx.from.id); s.awaiting="username"; try{ await ctx.editMessageText("❌ Bilgiler yanlış. Lütfen kullanıcı adınızı tekrar yazın:"); }catch{}; });
 
-// admin raffle entries – geniş alanlar
-app.get("/admin/raffle/entries", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
-  const key = (req.query.key || "default_raffle").toString();
-  const { rows } = await pool.query(
-    `SELECT re.id,
-            re.external_id,
-            re.created_at,
-            u.membership_id,
-            u.first_name,
-            u.last_name,
-            u.tg_first_name,
-            u.tg_last_name,
-            u.tg_username,
-            u.submitted_username
-     FROM raffle_entries re
-     LEFT JOIN users u ON u.external_id = re.external_id
-     WHERE re.raffle_key = $1
-     ORDER BY re.id DESC`,
-    [key]
-  );
-  res.json(rows);
-});
-
-app.post("/admin/raffles", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
-  const { key, title, active } = req.body || {};
-  if (!key || !title) return res.status(400).json({ error: "required" });
-  const { rows } = await pool.query(
-    "INSERT INTO raffles (key, title, active) VALUES ($1,$2,COALESCE($3,true)) ON CONFLICT (key) DO NOTHING RETURNING key, title, active",
-    [String(key), String(title), active ?? true]
-  );
-  if (!rows.length) return res.status(409).json({ error: "exists" });
-  res.json(rows[0]);
-});
-
-app.put("/admin/raffles/:key", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
-  const { title, active } = req.body || {};
-  const { rows } = await pool.query(
-    "UPDATE raffles SET title=COALESCE($2,title), active=COALESCE($3,active) WHERE key=$1 RETURNING key, title, active",
-    [req.params.key, title || null, typeof active === "boolean" ? active : null]
-  );
-  if (!rows.length) return res.status(404).json({ error: "not_found" });
-  res.json(rows[0]);
-});
-
-/* ---------------- NOTIFICATION TEMPLATES (admin) ---------------- */
-function auth(req, res) {
-  if (req.headers.authorization !== `Bearer ${ADMIN_TOKEN}`) {
-    res.status(401).json({ error: "unauthorized" });
-    return false;
+bot.action("confirm_yes", async (ctx)=>{
+  const s=S(ctx.from.id);
+  if (!s?.newUser?.id || !s?.newUser?.username) { await ctx.answerCbQuery("⚠️ Eksik bilgi").catch(()=>{}); return routeHome(ctx); }
+  try{
+    const { data } = await api.get(`/members/${s.newUser.id}`);
+    if (data.found){
+      await api.post(`/users`, {
+        external_id:String(ctx.from.id),
+        membership_id:s.newUser.id,
+        submitted_username:s.newUser.username,
+        tg_first_name:ctx.from.first_name||null,
+        tg_last_name:ctx.from.last_name||null,
+        tg_username:ctx.from.username||null
+      });
+      s.awaiting=undefined; s.newUser=undefined;
+      return routeHome(ctx);
+    } else {
+      await api.post(`/pending-requests`, {
+        external_id:String(ctx.from.id),
+        provided_membership_id:s.newUser.id,
+        full_name:(ctx.from.first_name||"") + (ctx.from.last_name?(" "+ctx.from.last_name):"")
+      }).catch(()=>{});
+      s.awaiting=undefined; s.newUser=undefined;
+      return routeHome(ctx);
+    }
+  }catch{
+    await ctx.answerCbQuery("⚠️ Doğrulama yapılamadı").catch(()=>{});
+    return routeHome(ctx);
   }
-  return true;
-}
-
-app.get("/admin/notifications/templates", async (req, res) => {
-  if (!auth(req, res)) return;
-  const { rows } = await pool.query(
-    "SELECT key, title, content, image_url, buttons, active, updated_at FROM notification_templates ORDER BY updated_at DESC"
-  );
-  res.json(rows);
 });
 
-app.get("/admin/notifications/templates/:key", async (req, res) => {
-  if (!auth(req, res)) return;
-  const { rows } = await pool.query(
-    "SELECT key, title, content, image_url, buttons, active, updated_at FROM notification_templates WHERE key=$1 LIMIT 1",
-    [req.params.key]
-  );
-  if (!rows.length) return res.status(404).json({ error: "not_found" });
-  res.json(rows[0]);
+// pending refresh
+bot.action("p_refresh", (ctx)=> routeHome(ctx));
+
+// guest panels
+bot.action("role_guest", (ctx)=> showGuest(ctx));
+bot.action("g_signup", async (ctx)=>{
+  const kb = SIGNUP_URL
+    ? Markup.inlineKeyboard([[Markup.button.url("📝 Kayıt Ol", SIGNUP_URL)],[Markup.button.callback("↩️ Geri","go_guest")]])
+    : KB.GUEST;
+  return ctx.reply("📝 Üye Ol açıklaması:", kb);
+});
+bot.action("g_benefits", async (ctx)=>{
+  const kb = SOCIAL_URL
+    ? Markup.inlineKeyboard([[Markup.button.url("🏅 Radisson Sosyal", SOCIAL_URL)],[Markup.button.callback("↩️ Geri","go_guest")]])
+    : KB.GUEST;
+  return ctx.reply("🏅 Ayrıcalıklar:", kb);
+});
+bot.action("g_events", (ctx)=> sendMessageByKey(ctx,"events",KB.GUEST));
+bot.action("g_campaigns", (ctx)=> ctx.reply("📢 Kampanyalar (katılmak için üye olunmalı).", KB.GUEST));
+bot.action("go_guest", (ctx)=> showGuest(ctx));
+
+// member-only panels
+async function requireMember(ctx){ const st=await getStatus(String(ctx.from.id)); if (st.stage!=="member"){ await ctx.answerCbQuery("⛔ Üyelik gerekli",{show_alert:true}).catch(()=>{}); return false; } return true; }
+bot.action("m_account", async (ctx)=>{ if(!(await requireMember(ctx))) return; await ctx.reply("🧾 Hesap bilgileri yakında.", KB.MEMBER); });
+bot.action("m_free",    async (ctx)=>{ if(!(await requireMember(ctx))) return; return sendMessageByKey(ctx,"member_free_events",KB.MEMBER); });
+bot.action("m_offers",  async (ctx)=>{ if(!(await requireMember(ctx))) return; return sendMessageByKey(ctx,"member_personal_offers",KB.MEMBER); });
+bot.action("m_campaigns", async (ctx)=>{
+  if(!(await requireMember(ctx))) return;
+  try{
+    const { data } = await api.get("/raffles/active");
+    if(!Array.isArray(data)||!data.length) return ctx.reply("ℹ️ Aktif kampanya yok.", KB.MEMBER);
+    const rows = data.map(r=>[Markup.button.callback(`📣 ${r.title}`,`raffle_join:${r.key}`)]);
+    return ctx.reply("📢 Aktif kampanyalar:", Markup.inlineKeyboard([...rows,[Markup.button.callback("↩️ Geri","go_member")]]));
+  }catch{ return ctx.reply("⚠️ Kampanyalar alınamadı.", KB.MEMBER); }
+});
+bot.action("go_member", (ctx)=> showMember(ctx));
+bot.action("m_raffle", async (ctx)=>{
+  if(!(await requireMember(ctx))) return;
+  try{
+    const { data } = await api.post("/raffle/enter",{ external_id:String(ctx.from.id), raffle_key:"default_raffle" });
+    if (data.joined) return sendMessageByKey(ctx,"raffle_joined",KB.MEMBER);
+    if (data.reason==="already") return sendMessageByKey(ctx,"raffle_already",KB.MEMBER);
+    return ctx.reply("⚠️ Çekiliş aktif değil.", KB.MEMBER);
+  }catch{ return ctx.reply("⚠️ Çekiliş kaydı yapılamadı.", KB.MEMBER); }
+});
+bot.action(/raffle_join:.+/, async (ctx)=>{
+  if(!(await requireMember(ctx))) return;
+  const key = ctx.callbackQuery.data.split(":")[1];
+  try{
+    const { data } = await api.post("/raffle/enter",{ external_id:String(ctx.from.id), raffle_key:key });
+    await ctx.answerCbQuery(data.joined?"🎟️ Katılım alındı":(data.reason==="already"?"🔁 Zaten katıldınız":"⛔ Pasif kampanya")).catch(()=>{});
+    if (data.joined) await sendMessageByKey(ctx,"raffle_joined",KB.MEMBER);
+    else if (data.reason==="already") await sendMessageByKey(ctx,"raffle_already",KB.MEMBER);
+  }catch{ await ctx.answerCbQuery("⚠️ Hata").catch(()=>{}); }
 });
 
-app.post("/admin/notifications/templates", async (req, res) => {
-  if (!auth(req, res)) return;
-  const { key, title, content, image_url, buttons, active } = req.body || {};
-  if (!key || !title || !content) return res.status(400).json({ error: "required" });
-  const { rows } = await pool.query(
-    `INSERT INTO notification_templates (key, title, content, image_url, buttons, active)
-     VALUES ($1,$2,$3,$4,COALESCE($5,'[]'::jsonb),COALESCE($6,true))
-     ON CONFLICT (key) DO NOTHING
-     RETURNING key, title, content, image_url, buttons, active, updated_at`,
-    [String(key), String(title), String(content), image_url || null, buttons || null, active ?? true]
-  );
-  if (!rows.length) return res.status(409).json({ error: "exists" });
-  res.json(rows[0]);
+// unknown callback -> home
+bot.on("callback_query", async (ctx,next)=>{
+  const d=ctx.callbackQuery?.data || "";
+  const known=/^(role_|g_|m_|go_|p_refresh|confirm_|raffle_join:)/.test(d);
+  if(!known){ await ctx.answerCbQuery("⚠️ Geçersiz seçim").catch(()=>{}); return routeHome(ctx); }
+  return next();
 });
 
-app.put("/admin/notifications/templates/:key", async (req, res) => {
-  if (!auth(req, res)) return;
-  const { title, content, image_url, buttons, active } = req.body || {};
-  const { rows } = await pool.query(
-    `UPDATE notification_templates
-     SET title=COALESCE($2,title),
-         content=COALESCE($3,content),
-         image_url=$4,
-         buttons=COALESCE($5,buttons),
-         active=COALESCE($6,active),
-         updated_at=now()
-     WHERE key=$1
-     RETURNING key, title, content, image_url, buttons, active, updated_at`,
-    [req.params.key, title || null, content || null, image_url || null, buttons || null, typeof active === "boolean" ? active : null]
-  );
-  if (!rows.length) return res.status(404).json({ error: "not_found" });
-  res.json(rows[0]);
-});
+// global errors
+bot.catch(async (err, ctx)=>{ console.error("Bot error:", err); try{ await ctx.reply("⚠️ Hata oluştu. Menüye dönüyorum."); await routeHome(ctx);}catch{}; });
 
-app.delete("/admin/notifications/templates/:key", async (req, res) => {
-  if (!auth(req, res)) return;
-  const { rowCount } = await pool.query("DELETE FROM notification_templates WHERE key=$1", [req.params.key]);
-  if (!rowCount) return res.status(404).json({ error: "not_found" });
-  res.json({ ok: true });
-});
-
-const port = process.env.PORT || 3000;
-initDb()
-  .then(() => app.listen(port, () => console.log(`API on :${port}`)))
-  .catch((e) => { console.error("DB init error", e); process.exit(1); });
+// launch
+bot.launch({ dropPendingUpdates: true });
+console.log("Bot: tek Express, invalidate aktif, tek mesaj/görsel ve statü tabanlı navigasyon.");
