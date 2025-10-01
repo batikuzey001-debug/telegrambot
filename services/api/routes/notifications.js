@@ -5,7 +5,6 @@ import { buildFixedButtons } from "../utils/buttons.js";
 const BOT_NOTIFY_URL = process.env.BOT_NOTIFY_URL || "";
 const ADMIN_NOTIFY_SECRET = process.env.ADMIN_NOTIFY_SECRET || "";
 
-/* html escape + kişiselleştirilmiş metin */
 function escapeHtml(s) {
   return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 }
@@ -16,8 +15,6 @@ function renderText(title, fullName, content) {
   lines.push(escapeHtml(content || ""));
   return lines.join("\n");
 }
-
-/* tek kullanıcıya gönder */
 async function sendToOne(external_id, tpl) {
   const { rows } = await pool.query(
     "SELECT first_name,last_name FROM users WHERE external_id=$1 LIMIT 1",
@@ -25,13 +22,11 @@ async function sendToOne(external_id, tpl) {
   );
   const fullName = [rows[0]?.first_name, rows[0]?.last_name].filter(Boolean).join(" ").trim();
   const text = renderText(tpl.title, fullName, tpl.content);
-  const buttons = JSON.parse(buildFixedButtons()); // [{text,url}]
-  const payload = { external_id: String(external_id), text, buttons, image_url: tpl.image_url || null };
-
+  const buttons = JSON.parse(buildFixedButtons());
   const r = await fetch(BOT_NOTIFY_URL, {
     method: "POST",
     headers: { "Content-Type":"application/json", "x-admin-secret": ADMIN_NOTIFY_SECRET },
-    body: JSON.stringify(payload)
+    body: JSON.stringify({ external_id:String(external_id), text, buttons, image_url: tpl.image_url || null })
   });
   if (!r.ok) throw new Error(`notify_failed:${r.status}`);
 }
@@ -39,21 +34,12 @@ async function sendToOne(external_id, tpl) {
 export function notificationsRouter(auth) {
   const r = Router();
 
-  /* CRUD (mevcut) */
+  // templates CRUD (mevcut sürümünüz)
   r.get("/templates", auth, async (_req,res)=>{
     const { rows } = await pool.query(
       "SELECT key,title,content,image_url,buttons,active,updated_at FROM notification_templates ORDER BY updated_at DESC"
     );
     res.json(rows);
-  });
-
-  r.get("/templates/:key", auth, async (req,res)=>{
-    const { rows } = await pool.query(
-      "SELECT key,title,content,image_url,buttons,active,updated_at FROM notification_templates WHERE key=$1 LIMIT 1",
-      [req.params.key]
-    );
-    if (!rows.length) return res.status(404).json({ error:"not_found" });
-    res.json(rows[0]);
   });
 
   r.post("/templates", auth, async (req,res)=>{
@@ -90,18 +76,10 @@ export function notificationsRouter(auth) {
     res.json(rows[0]);
   });
 
-  r.delete("/templates/:key", auth, async (req,res)=>{
-    const { rowCount } = await pool.query("DELETE FROM notification_templates WHERE key=$1",[req.params.key]);
-    if (!rowCount) return res.status(404).json({ error:"not_found" });
-    res.json({ ok:true });
-  });
-
-  /* === YENİ: SEND === */
+  // SEND: segmentler
   r.post("/send", auth, async (req,res)=>{
-    if (!BOT_NOTIFY_URL || !ADMIN_NOTIFY_SECRET) {
-      return res.status(500).json({ error:"misconfigured_bot_notify" });
-    }
-    const { key, external_ids, segment } = req.body || {};
+    if (!BOT_NOTIFY_URL || !ADMIN_NOTIFY_SECRET) return res.status(500).json({ error:"misconfigured_bot_notify" });
+    const { key, external_ids, segment, membership_ids, membership_prefix } = req.body || {};
     if (!key) return res.status(400).json({ error:"key_required" });
 
     const { rows: tplRows } = await pool.query(
@@ -112,8 +90,21 @@ export function notificationsRouter(auth) {
     const tpl = tplRows[0];
 
     let targets = [];
+
     if (Array.isArray(external_ids) && external_ids.length) {
       targets = external_ids.map(String);
+    } else if (Array.isArray(membership_ids) && membership_ids.length) {
+      const { rows } = await pool.query(
+        "SELECT external_id FROM users WHERE membership_id = ANY($1::text[])",
+        [membership_ids.map(String)]
+      );
+      targets = rows.map(r => String(r.external_id));
+    } else if (membership_prefix) {
+      const { rows } = await pool.query(
+        "SELECT external_id FROM users WHERE membership_id LIKE $1",
+        [String(membership_prefix) + "%"]
+      );
+      targets = rows.map(r => String(r.external_id));
     } else if (segment === "all_members") {
       const { rows } = await pool.query("SELECT external_id FROM users WHERE membership_id IS NOT NULL");
       targets = rows.map(r => String(r.external_id));
@@ -123,13 +114,11 @@ export function notificationsRouter(auth) {
     } else {
       return res.status(400).json({ error:"no_targets" });
     }
-    targets = Array.from(new Set(targets));
 
-    let ok = 0, fail = 0;
-    for (const ext of targets) {
-      try { await sendToOne(ext, tpl); ok++; } catch { fail++; }
-    }
-    return res.json({ ok, fail, total: targets.length });
+    targets = Array.from(new Set(targets));
+    let ok=0, fail=0;
+    for (const ext of targets) { try { await sendToOne(ext, tpl); ok++; } catch { fail++; } }
+    res.json({ ok, fail, total: targets.length });
   });
 
   return r;
