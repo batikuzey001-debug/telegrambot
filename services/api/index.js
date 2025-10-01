@@ -531,20 +531,23 @@ function auth(req, res) {
   return true;
 }
 
-// normalize 'buttons' to a proper array and cast to jsonb in queries
-function normalizeButtons(input) {
-  if (Array.isArray(input)) {
-    return input.filter(b => b && typeof b.text === "string" && typeof b.url === "string");
-  }
-  if (typeof input === "string") {
-    try {
-      const v = JSON.parse(input);
-      return Array.isArray(v) ? v.filter(b => b && typeof b.text === "string" && typeof b.url === "string") : [];
-    } catch {
-      return [];
-    }
-  }
-  return [];
+// sanitize helpers for fixed buttons
+const _trimQ = (s)=> (s ?? "").toString().trim().replace(/^['"]+|['"]+$/g,"");
+const _isUrl = (u)=> { try { new URL(u); return true; } catch { return false; } };
+
+// always build buttons on server from ENV to avoid invalid JSON payloads
+function buildFixedButtons() {
+  const GUNCEL = _trimQ(process.env.GUNCEL_GIRIS_URL || process.env.NEXT_PUBLIC_GUNCEL_GIRIS_URL);
+  const SOCIAL = _trimQ(process.env.SOCIAL_URL || process.env.NEXT_PUBLIC_SOCIAL_URL);
+  const MEMBER = _trimQ(process.env.BOT_MEMBER_DEEPLINK || process.env.NEXT_PUBLIC_BOT_MEMBER_DEEPLINK);
+  const arr = [
+    { text: "Radissonbet Güncel Giriş", url: GUNCEL },
+    { text: "Ücretsiz Etkinlik",        url: SOCIAL },
+    { text: "Bonus",                     url: SOCIAL },
+    { text: "Promosyon Kodları",         url: SOCIAL },
+    { text: "Bana Özel Fırsatlar",       url: MEMBER },
+  ].filter(b => b.url && _isUrl(b.url));
+  return JSON.stringify(arr);
 }
 
 app.get("/admin/notifications/templates", async (req, res) => {
@@ -567,17 +570,17 @@ app.get("/admin/notifications/templates/:key", async (req, res) => {
 
 app.post("/admin/notifications/templates", async (req, res) => {
   if (!auth(req, res)) return;
-  const { key, title, content, image_url, buttons, active } = req.body || {};
+  const { key, title, content, image_url, active } = req.body || {};
   if (!key || !title || !content) return res.status(400).json({ error: "required" });
 
-  const btns = normalizeButtons(buttons);
+  const buttonsJson = buildFixedButtons(); // ignore client buttons; always server-built
   try {
     const { rows } = await pool.query(
       `INSERT INTO notification_templates (key, title, content, image_url, buttons, active)
        VALUES ($1,$2,$3,$4,$5::jsonb,COALESCE($6,true))
        ON CONFLICT (key) DO NOTHING
        RETURNING key, title, content, image_url, buttons, active, updated_at`,
-      [String(key), String(title), String(content), image_url || null, JSON.stringify(btns), active ?? true]
+      [String(key), String(title), String(content), image_url || null, buttonsJson, active ?? true]
     );
     if (!rows.length) return res.status(409).json({ error: "exists" });
     res.json(rows[0]);
@@ -589,9 +592,8 @@ app.post("/admin/notifications/templates", async (req, res) => {
 
 app.put("/admin/notifications/templates/:key", async (req, res) => {
   if (!auth(req, res)) return;
-  const { title, content, image_url, buttons, active } = req.body || {};
-  const hasButtons = typeof buttons !== "undefined";
-  const btns = hasButtons ? normalizeButtons(buttons) : null;
+  const { title, content, image_url, active } = req.body || {};
+  const buttonsJson = buildFixedButtons(); // overwrite to fixed set
 
   try {
     const { rows } = await pool.query(
@@ -599,7 +601,7 @@ app.put("/admin/notifications/templates/:key", async (req, res) => {
          SET title     = COALESCE($2, title),
              content   = COALESCE($3, content),
              image_url = $4,
-             buttons   = CASE WHEN $5 IS NULL THEN buttons ELSE $5::jsonb END,
+             buttons   = $5::jsonb,
              active    = COALESCE($6, active),
              updated_at= now()
        WHERE key=$1
@@ -609,7 +611,7 @@ app.put("/admin/notifications/templates/:key", async (req, res) => {
         title || null,
         content || null,
         typeof image_url === "undefined" ? null : (image_url || null),
-        hasButtons ? JSON.stringify(btns) : null,
+        buttonsJson,
         typeof active === "boolean" ? active : null
       ]
     );
