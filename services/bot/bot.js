@@ -159,12 +159,22 @@ async function routeHome(ctx) {
   S(ctx.from.id).stage = "ROOT"; return showRoot(ctx);
 }
 
-/* ---------------- Start (debounced) ---------------- */
+/* ---------------- Start (debounced + payload) ---------------- */
 bot.start(async (ctx) => {
   const now = Date.now();
   const prev = lastStart.get(ctx.from.id) || 0;
   if (now - prev < 1500) return; // debounce duplicate /start
   lastStart.set(ctx.from.id, now);
+
+  // /start payload desteği: ?start=go_member
+  const payload = ctx.startPayload;
+  if (payload === "go_member") {
+    const st = await getStatus(String(ctx.from.id));
+    if (st.stage === "member") {
+      return showMember(ctx, buildName(st.user || {}));
+    }
+    // üye değilse normal akışa yönlendir
+  }
 
   const st = await getStatus(String(ctx.from.id));
   await sendMessageByKey(ctx, "welcome", undefined, st);
@@ -337,7 +347,7 @@ bot.action("m_campaigns", async (ctx) => {
   } catch { return ctx.reply("⚠️ Kampanyalar alınamadı.", KB.MEMBER_HOME); }
 });
 
-bot.action("go_member", (ctx) => showMember(ctx));
+bot.action("go_member", (ctx) => routeHome(ctx));
 bot.action("m_raffle", async (ctx) => {
   if (!(await requireMember(ctx))) return;
   try {
