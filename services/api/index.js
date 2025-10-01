@@ -531,6 +531,22 @@ function auth(req, res) {
   return true;
 }
 
+// normalize 'buttons' to a proper array and cast to jsonb in queries
+function normalizeButtons(input) {
+  if (Array.isArray(input)) {
+    return input.filter(b => b && typeof b.text === "string" && typeof b.url === "string");
+  }
+  if (typeof input === "string") {
+    try {
+      const v = JSON.parse(input);
+      return Array.isArray(v) ? v.filter(b => b && typeof b.text === "string" && typeof b.url === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 app.get("/admin/notifications/templates", async (req, res) => {
   if (!auth(req, res)) return;
   const { rows } = await pool.query(
@@ -553,34 +569,56 @@ app.post("/admin/notifications/templates", async (req, res) => {
   if (!auth(req, res)) return;
   const { key, title, content, image_url, buttons, active } = req.body || {};
   if (!key || !title || !content) return res.status(400).json({ error: "required" });
-  const { rows } = await pool.query(
-    `INSERT INTO notification_templates (key, title, content, image_url, buttons, active)
-     VALUES ($1,$2,$3,$4,COALESCE($5,'[]'::jsonb),COALESCE($6,true))
-     ON CONFLICT (key) DO NOTHING
-     RETURNING key, title, content, image_url, buttons, active, updated_at`,
-    [String(key), String(title), String(content), image_url || null, buttons || null, active ?? true]
-  );
-  if (!rows.length) return res.status(409).json({ error: "exists" });
-  res.json(rows[0]);
+
+  const btns = normalizeButtons(buttons);
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO notification_templates (key, title, content, image_url, buttons, active)
+       VALUES ($1,$2,$3,$4,$5::jsonb,COALESCE($6,true))
+       ON CONFLICT (key) DO NOTHING
+       RETURNING key, title, content, image_url, buttons, active, updated_at`,
+      [String(key), String(title), String(content), image_url || null, JSON.stringify(btns), active ?? true]
+    );
+    if (!rows.length) return res.status(409).json({ error: "exists" });
+    res.json(rows[0]);
+  } catch (e) {
+    console.error("templates POST error:", e);
+    res.status(500).json({ error: "insert_failed" });
+  }
 });
 
 app.put("/admin/notifications/templates/:key", async (req, res) => {
   if (!auth(req, res)) return;
   const { title, content, image_url, buttons, active } = req.body || {};
-  const { rows } = await pool.query(
-    `UPDATE notification_templates
-     SET title=COALESCE($2,title),
-         content=COALESCE($3,content),
-         image_url=$4,
-         buttons=COALESCE($5,buttons),
-         active=COALESCE($6,active),
-         updated_at=now()
-     WHERE key=$1
-     RETURNING key, title, content, image_url, buttons, active, updated_at`,
-    [req.params.key, title || null, content || null, image_url || null, buttons || null, typeof active === "boolean" ? active : null]
-  );
-  if (!rows.length) return res.status(404).json({ error: "not_found" });
-  res.json(rows[0]);
+  const hasButtons = typeof buttons !== "undefined";
+  const btns = hasButtons ? normalizeButtons(buttons) : null;
+
+  try {
+    const { rows } = await pool.query(
+      `UPDATE notification_templates
+         SET title     = COALESCE($2, title),
+             content   = COALESCE($3, content),
+             image_url = $4,
+             buttons   = CASE WHEN $5 IS NULL THEN buttons ELSE $5::jsonb END,
+             active    = COALESCE($6, active),
+             updated_at= now()
+       WHERE key=$1
+       RETURNING key, title, content, image_url, buttons, active, updated_at`,
+      [
+        req.params.key,
+        title || null,
+        content || null,
+        typeof image_url === "undefined" ? null : (image_url || null),
+        hasButtons ? JSON.stringify(btns) : null,
+        typeof active === "boolean" ? active : null
+      ]
+    );
+    if (!rows.length) return res.status(404).json({ error: "not_found" });
+    res.json(rows[0]);
+  } catch (e) {
+    console.error("templates PUT error:", e);
+    res.status(500).json({ error: "update_failed" });
+  }
 });
 
 app.delete("/admin/notifications/templates/:key", async (req, res) => {
