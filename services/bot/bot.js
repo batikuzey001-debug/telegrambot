@@ -43,23 +43,36 @@ async function fetchMessage(key) {
 }
 async function getMessage(key) {
   const c = getCached(key);
-  if (c) {
-    fetchMessage(key).catch(() => {});
-    return c;
-  }
-  try {
-    return await fetchMessage(key);
-  } catch {
-    return { content: "İçerik bulunamadı.", image_url: null, file_id: null };
-  }
+  if (c) { fetchMessage(key).catch(() => {}); return c; }
+  try { return await fetchMessage(key); }
+  catch { return { content: "İçerik bulunamadı.", image_url: null, file_id: null }; }
 }
 
-/** Tek mesaj kuralı: görsel varsa foto+caption; yoksa metin. */
-async function sendMessageByKey(ctx, key, extra) {
+async function getStatus(externalId) {
+  try { const { data } = await api.get(`/users/status/${externalId}`); return data; }
+  catch { return { stage: "guest" }; }
+}
+
+function buildName(user) {
+  return [user?.first_name, user?.last_name].filter(Boolean).join(" ").trim();
+}
+function personalize(st, text) {
+  if (st?.stage !== "member") return text;
+  const name = buildName(st.user || {});
+  if (!name) return text;
+  return `Sayın ${name},\n\n${text}`;
+}
+
+/** Tek mesaj kuralı: görsel varsa foto+caption; yoksa metin.
+ *  Üye için caption/metin kişiselleştirilir.
+ */
+async function sendMessageByKey(ctx, key, extra, stOpt) {
+  const st = stOpt || await getStatus(String(ctx.from.id));
   const msg = await getMessage(key);
+  const content = personalize(st, msg.content);
 
   if (msg.file_id) {
-    return ctx.replyWithPhoto(msg.file_id, { caption: msg.content, ...extra });
+    return ctx.replyWithPhoto(msg.file_id, { caption: content, ...extra });
   }
 
   if (msg.image_url) {
@@ -67,42 +80,28 @@ async function sendMessageByKey(ctx, key, extra) {
       const r = await axios.get(msg.image_url, { responseType: "arraybuffer", timeout: 4000, maxRedirects: 4 });
       const sent = await ctx.replyWithPhoto(
         { source: Buffer.from(r.data), filename: "image" },
-        { caption: msg.content, ...extra }
+        { caption: content, ...extra }
       );
-      // neden: yeni file_id'yi DB'ye yazmak tekrar upload'ı engeller
+      // Neden: Bir sonraki gönderimde tekrar upload edilmesin
       if (sent?.photo?.length && BOT_WRITE_SECRET) {
         const fid = sent.photo[sent.photo.length - 1].file_id;
-        await api.put(
-          `/bot/messages/${key}/file-id`,
-          { file_id: fid },
-          { headers: { "x-bot-secret": BOT_WRITE_SECRET } }
-        );
+        await api.put(`/bot/messages/${key}/file-id`, { file_id: fid }, { headers: { "x-bot-secret": BOT_WRITE_SECRET } });
         setCached(key, { ...msg, file_id: fid });
       }
       return sent;
     } catch {
-      return ctx.reply(msg.content, extra);
+      return ctx.reply(content, extra);
     }
   }
 
-  return ctx.reply(msg.content, extra);
+  return ctx.reply(content, extra);
 }
 
 async function isChannelMember(ctx) {
   try {
     const m = await ctx.telegram.getChatMember(CHANNEL_USERNAME, ctx.from.id);
     return ["creator", "administrator", "member"].includes(m.status);
-  } catch {
-    return false;
-  }
-}
-async function getStatus(externalId) {
-  try {
-    const { data } = await api.get(`/users/status/${externalId}`);
-    return data;
-  } catch {
-    return { stage: "guest" };
-  }
+  } catch { return false; }
 }
 
 /* ---------------- Inline keyboards ---------------- */
@@ -116,7 +115,7 @@ const KB = {
     [Markup.button.callback("🎁 Ücretsiz Etkinlikler", "m_free")],
     [Markup.button.callback("⭐ Bana Özel Fırsatlar", "m_offers")],
     [Markup.button.callback("📢 Özel Kampanyalar", "m_campaigns")],
-    [Markup.button.callback("🎟️ Çekilişe Katıl", "m_raffle")],
+    [Markup.button.callback("🎟️ Çekilişler", "m_raffle")],
     [Markup.button.callback("🏠 Ana Menü", "go_root")]
   ]),
   GUEST_HOME: Markup.inlineKeyboard([
@@ -137,13 +136,14 @@ const KB = {
 };
 
 /* ---------------- Light state + debouncer ---------------- */
-const state = new Map();
+const state = new Map(); // uid -> { stage, awaiting?, newUser? }
 const S = (uid) => { if (!state.has(uid)) state.set(uid, { stage: "ROOT" }); return state.get(uid); };
-const lastStart = new Map();
+const lastStart = new Map(); // uid -> ts
 
 /* ---------------- Render helpers ---------------- */
 const showRoot = (ctx) => ctx.reply("👇 Lütfen bir seçenek seçin:", KB.ROOT);
-const showMember = (ctx, name) => ctx.reply(name ? `👋 Merhaba ${name}\n🧭 Üyelik menüsü:` : "🧭 Üyelik menüsü:", KB.MEMBER_HOME);
+const showMember = (ctx, name) =>
+  ctx.reply(name ? `👋 Merhaba ${name}\n🧭 Üyelik menüsü:` : "🧭 Üyelik menüsü:", KB.MEMBER_HOME);
 const showGuest = (ctx) => ctx.reply("🧭 Misafir menüsü:", KB.GUEST_HOME);
 const showPending = (ctx) => ctx.reply("⏳ Başvurunuz inceleniyor. Onaylanınca üyelik ana sayfanız açılacak.", KB.PENDING_HOME);
 
@@ -151,28 +151,26 @@ const showPending = (ctx) => ctx.reply("⏳ Başvurunuz inceleniyor. Onaylanınc
 async function routeHome(ctx) {
   const st = await getStatus(String(ctx.from.id));
   if (st.stage === "member") {
-    const name = [st.user?.first_name, st.user?.last_name].filter(Boolean).join(" ");
+    const name = buildName(st.user || {});
     S(ctx.from.id).stage = "MEMBER";
     return showMember(ctx, name);
   }
-  if (st.stage === "pending") {
-    S(ctx.from.id).stage = "PENDING";
-    return showPending(ctx);
-  }
-  S(ctx.from.id).stage = "ROOT";
-  return showRoot(ctx);
+  if (st.stage === "pending") { S(ctx.from.id).stage = "PENDING"; return showPending(ctx); }
+  S(ctx.from.id).stage = "ROOT"; return showRoot(ctx);
 }
 
 /* ---------------- Start (debounced) ---------------- */
 bot.start(async (ctx) => {
   const now = Date.now();
   const prev = lastStart.get(ctx.from.id) || 0;
-  if (now - prev < 1500) return;
+  if (now - prev < 1500) return; // debounce duplicate /start
   lastStart.set(ctx.from.id, now);
 
-  await sendMessageByKey(ctx, "welcome");
+  const st = await getStatus(String(ctx.from.id));
+  await sendMessageByKey(ctx, "welcome", undefined, st);
+
   const ok = await isChannelMember(ctx);
-  if (!ok) return sendMessageByKey(ctx, "not_member", KB.JOIN);
+  if (!ok) return sendMessageByKey(ctx, "not_member", KB.JOIN, st);
   return routeHome(ctx);
 });
 
@@ -188,10 +186,10 @@ bot.action("verify_join", async (ctx) => {
 /* ---------------- Root and navigation ---------------- */
 bot.action("go_root", (ctx) => routeHome(ctx));
 
-/* ---------------- Registration flow ---------------- */
+/* ---------------- Registration flow (guarded) ---------------- */
 bot.action("role_member", async (ctx) => {
   const st = await getStatus(String(ctx.from.id));
-  if (st.stage === "member") return showMember(ctx, [st.user?.first_name, st.user?.last_name].filter(Boolean).join(" "));
+  if (st.stage === "member") return showMember(ctx, buildName(st.user || {}));
   if (st.stage === "pending") return showPending(ctx);
 
   const s = S(ctx.from.id);
@@ -202,7 +200,7 @@ bot.action("role_member", async (ctx) => {
 
 bot.on("text", async (ctx) => {
   const st = await getStatus(String(ctx.from.id));
-  if (st.stage === "member") return showMember(ctx, [st.user?.first_name, st.user?.last_name].filter(Boolean).join(" "));
+  if (st.stage === "member") return showMember(ctx, buildName(st.user || {}));
   if (st.stage === "pending") return showPending(ctx);
 
   const s = S(ctx.from.id);
@@ -220,13 +218,10 @@ bot.on("text", async (ctx) => {
     s.newUser = { ...(s.newUser || {}), id: text };
 
     const confirmText =
-      "🧩 Bilgilerini Onayla\n" +
-      "~~~~~~~~~~~~~~~~~~~~\n" +
+      "🧩 Bilgilerini Onayla\n~~~~~~~~~~~~~~~~~~~~\n" +
       `👤 Kullanıcı adı: ${s.newUser.username}\n` +
-      `🪪 Üyelik numarası: ${s.newUser.id}\n` +
-      "~~~~~~~~~~~~~~~~~~~~\n" +
-      "👉 Doğruysa “Evet”, düzeltmek için “Hayır”.\n" +
-      "↩️ Baştan girmek için “Başa Dön”.";
+      `🪪 Üyelik numarası: ${s.newUser.id}\n~~~~~~~~~~~~~~~~~~~~\n` +
+      "👉 Doğruysa “Evet”, düzeltmek için “Hayır”.\n↩️ Baştan girmek için “Başa Dön”.";
     const kb = Markup.inlineKeyboard([
       [Markup.button.callback("✅ Evet", "confirm_yes"), Markup.button.callback("❌ Hayır", "confirm_no")],
       [Markup.button.callback("🔙 Başa Dön", "confirm_restart")]
@@ -309,10 +304,31 @@ async function requireMember(ctx) {
   return true;
 }
 bot.action("m_account", async (ctx) => { if (!(await requireMember(ctx))) return; await ctx.reply("🧾 Hesap bilgileri yakında.", KB.MEMBER_HOME); });
-bot.action("m_free",    async (ctx) => { if (!(await requireMember(ctx))) return; return sendMessageByKey(ctx, "member_free_events", KB.MEMBER_HOME); });
-bot.action("m_offers",  async (ctx) => { if (!(await requireMember(ctx))) return; return sendMessageByKey(ctx, "member_personal_offers", KB.MEMBER_HOME); });
+
+/* Ücretsiz Etkinlikler → Radisson Sosyal'e yönlendirme butonu */
+bot.action("m_free", async (ctx) => {
+  if (!(await requireMember(ctx))) return;
+  const kb = SOCIAL_URL
+    ? Markup.inlineKeyboard([[Markup.button.url("🔗 Radisson Sosyal", SOCIAL_URL)], [Markup.button.callback("↩️ Geri", "go_member")]])
+    : KB.MEMBER_HOME;
+  return sendMessageByKey(ctx, "member_free_events", kb);
+});
+
+/* Bana Özel Fırsatlar → yapım aşaması metni */
+bot.action("m_offers", async (ctx) => {
+  if (!(await requireMember(ctx))) return;
+  return sendMessageByKey(ctx, "member_personal_offers", KB.MEMBER_HOME);
+});
+
+/* Özel Kampanyalar → Radisson Sosyal'e yönlendirme butonu + mevcut kampanya listesi */
 bot.action("m_campaigns", async (ctx) => {
   if (!(await requireMember(ctx))) return;
+  if (SOCIAL_URL) {
+    await ctx.reply("📢 Özel kampanyalar için Radisson Sosyal:", Markup.inlineKeyboard([
+      [Markup.button.url("🔗 Radisson Sosyal", SOCIAL_URL)],
+      [Markup.button.callback("↩️ Geri", "go_member")]
+    ]));
+  }
   try {
     const { data } = await api.get("/raffles/active");
     if (!Array.isArray(data) || !data.length) return ctx.reply("ℹ️ Aktif kampanya yok.", KB.MEMBER_HOME);
@@ -320,6 +336,7 @@ bot.action("m_campaigns", async (ctx) => {
     return ctx.reply("📢 Aktif kampanyalar:", Markup.inlineKeyboard([...rows, [Markup.button.callback("↩️ Geri", "go_member")]]));
   } catch { return ctx.reply("⚠️ Kampanyalar alınamadı.", KB.MEMBER_HOME); }
 });
+
 bot.action("go_member", (ctx) => showMember(ctx));
 bot.action("m_raffle", async (ctx) => {
   if (!(await requireMember(ctx))) return;
@@ -355,7 +372,7 @@ bot.catch(async (err, ctx) => {
   try { await ctx.reply("⚠️ Hata oluştu. Menüye dönüyorum."); await routeHome(ctx); } catch {}
 });
 
-/* ---------------- Minimal HTTP (invalidate) ---------------- */
+/* ---------------- Minimal HTTP (invalidate + notify) ---------------- */
 const httpApp = express();
 httpApp.use(express.json());
 httpApp.get("/", (_req, res) => res.json({ ok: true, service: "bot" }));
@@ -374,13 +391,12 @@ httpApp.post("/invalidate", (req, res) => {
 });
 httpApp.listen(Number(PORT || 3001), () => console.log(`bot http on :${Number(PORT || 3001)}`));
 
-/* ---------------- Launch (single instance) ---------------- */
+/* ---------------- Launch (single instance, conflict-safe) ---------------- */
 async function bootstrap() {
   try {
-    // neden: olası eski webhook/polling çakışmasını temizlemek
-    await bot.telegram.deleteWebhook({ drop_pending_updates: true }).catch(() => {});
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true }).catch(() => {}); // 409 önleme
     await bot.launch({ dropPendingUpdates: true });
-    console.log("Bot: status-driven nav; single message/photo; invalidate ready.");
+    console.log("Bot: kişiselleştirilmiş iletiler aktif; tek mesaj/tek görsel; invalidate hazır.");
   } catch (e) {
     console.error("Launch error:", e);
     process.exit(1);
