@@ -15,6 +15,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <a href="/raffles" style={{ color: "#fff" }}>Kampanyalar</a>
               <a href="/raffle" style={{ color: "#fff" }}>Kampanya Katılımcıları</a>
               <a href="/notifications" style={{ color: "#fff" }}>Bildirimler</a>
+              <a href="/admin/messages" style={{ color: "#fff" }}>Mesajlar</a>
             </nav>
           </aside>
           <main style={{ flex: 1, padding: 24 }}>{children}</main>
