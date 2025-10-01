@@ -2,7 +2,7 @@ import { Router } from "express";
 import { pool } from "../db.js";
 import { buildFixedButtons } from "../utils/buttons.js";
 
-export function notificationsRouter(auth){
+export function notificationsRouter(auth) {
   const r = Router();
 
   r.get("/templates", auth, async (_req,res)=>{
@@ -24,13 +24,14 @@ export function notificationsRouter(auth){
   r.post("/templates", auth, async (req,res)=>{
     const { key,title,content,image_url,active } = req.body || {};
     if (!key || !title || !content) return res.status(400).json({ error:"required" });
-    const buttonsJson = buildFixedButtons();
+
+    const buttonsJson = buildFixedButtons(); // istemci buttons yok sayılır
     const { rows } = await pool.query(
       `INSERT INTO notification_templates (key,title,content,image_url,buttons,active)
        VALUES ($1,$2,$3,$4,$5::jsonb,COALESCE($6,true))
        ON CONFLICT (key) DO NOTHING
        RETURNING key,title,content,image_url,buttons,active,updated_at`,
-      [String(key),String(title),String(content),image_url||null,buttonsJson,active??true]
+      [String(key), String(title), String(content), image_url || null, buttonsJson, active ?? true]
     );
     if (!rows.length) return res.status(409).json({ error:"exists" });
     res.json(rows[0]);
@@ -38,7 +39,8 @@ export function notificationsRouter(auth){
 
   r.put("/templates/:key", auth, async (req,res)=>{
     const { title,content,image_url,active } = req.body || {};
-    const buttonsJson = buildFixedButtons();
+    const buttonsJson = buildFixedButtons(); // her güncellemede sabit set
+
     const { rows } = await pool.query(
       `UPDATE notification_templates
        SET title=COALESCE($2,title),
