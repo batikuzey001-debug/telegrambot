@@ -22,7 +22,7 @@ app.get("/", (_req, res) => res.json({ ok: true }));
 
 // routes
 app.use("/messages", messagesRouter(auth));                   // /messages, /messages/:key, /messages/admin/:key, /messages/bot/:key/file-id
-app.use("/users", usersRouter(auth));                         // upsert/list/status + /users/admin/:external_id (DELETE) uses auth
+app.use("/users", usersRouter(auth));                         // upsert/list/status + /users/admin/:external_id (DELETE/PATCH) uses auth
 app.use("/", membersRouter(auth));                            // /members/:id, /admin/members/import, /pending-requests, ...
 app.use("/", rafflesRouter(auth));                            // /raffle/enter, /raffles/active, /raffles/admin...
 app.use("/admin/notifications", notificationsRouter(auth));   // /admin/notifications/templates, /admin/notifications/send, /admin/notifications/_health
