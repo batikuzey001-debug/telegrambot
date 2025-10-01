@@ -7,7 +7,7 @@ export const pool = new Pool({
 });
 
 export async function initDb() {
-  await pool.query(/* sql */`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id BIGSERIAL PRIMARY KEY,
       external_id TEXT UNIQUE NOT NULL,
@@ -20,6 +20,7 @@ export async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+
     CREATE TABLE IF NOT EXISTS messages (
       id BIGSERIAL PRIMARY KEY,
       key TEXT UNIQUE NOT NULL,
@@ -29,6 +30,7 @@ export async function initDb() {
       active BOOLEAN NOT NULL DEFAULT TRUE,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+
     CREATE TABLE IF NOT EXISTS audit_logs (
       id BIGSERIAL PRIMARY KEY,
       user_id BIGINT REFERENCES users(id),
@@ -36,6 +38,7 @@ export async function initDb() {
       meta JSONB DEFAULT '{}'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+
     CREATE TABLE IF NOT EXISTS members (
       membership_id TEXT PRIMARY KEY,
       first_name TEXT NOT NULL,
@@ -44,6 +47,7 @@ export async function initDb() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
     CREATE INDEX IF NOT EXISTS idx_membership_id ON members (membership_id);
+
     CREATE TABLE IF NOT EXISTS pending_verifications (
       id BIGSERIAL PRIMARY KEY,
       external_id TEXT NOT NULL,
@@ -56,12 +60,14 @@ export async function initDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_verifications (status);
     CREATE INDEX IF NOT EXISTS idx_pending_external ON pending_verifications (external_id);
+
     CREATE TABLE IF NOT EXISTS raffles (
       key TEXT PRIMARY KEY,
       title TEXT NOT NULL,
       active BOOLEAN NOT NULL DEFAULT TRUE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+
     CREATE TABLE IF NOT EXISTS raffle_entries (
       id BIGSERIAL PRIMARY KEY,
       raffle_key TEXT NOT NULL REFERENCES raffles(key) ON DELETE CASCADE,
@@ -69,6 +75,7 @@ export async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       UNIQUE (raffle_key, external_id)
     );
+
     CREATE TABLE IF NOT EXISTS notification_templates (
       id BIGSERIAL PRIMARY KEY,
       key TEXT UNIQUE NOT NULL,
@@ -94,6 +101,7 @@ export async function initDb() {
       ('raffle_joined','Çekilişe katılımınız alındı. Bol şans!'),
       ('raffle_already','Zaten bu çekilişe katılmışsınız.')
     ON CONFLICT (key) DO NOTHING;
+
     INSERT INTO raffles (key,title,active)
       VALUES ('default_raffle','Genel Çekiliş',true)
       ON CONFLICT (key) DO NOTHING;
