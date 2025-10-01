@@ -1,206 +1,147 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 
-type UserRow = {
+type User = {
   id: number;
   external_id: string;
-  name: string | null;
   first_name: string | null;
   last_name: string | null;
   membership_id: string | null;
-  tg_first_name?: string | null;
-  tg_last_name?: string | null;
-  tg_username?: string | null;
-  submitted_username?: string | null;
-  status: "member" | "pending" | "guest" | string;
+  tg_username: string | null;
+  submitted_username: string | null;
+  status: "member" | "pending" | "guest";
 };
 
-async function getUsers(): Promise<UserRow[]> {
-  const r = await fetch("/api/users", { cache: "no-store" });
-  if (!r.ok) return [];
-  return r.json();
-}
-
 export default function UsersPage() {
-  const [rows, setRows] = useState<UserRow[]>([]);
+  const [rows, setRows] = useState<User[]>([]);
   const [q, setQ] = useState("");
   const [msg, setMsg] = useState("");
+  const [edit, setEdit] = useState<User | null>(null);
+  const [form, setForm] = useState<Partial<User>>({});
 
-  // manual add form
-  const [externalId, setExternalId] = useState("");
-  const [membershipId, setMembershipId] = useState("");
-  const [submittedUsername, setSubmittedUsername] = useState("");
-  const [tgFirst, setTgFirst] = useState("");
-  const [tgLast, setTgLast] = useState("");
-  const [tgUser, setTgUser] = useState("");
-
-  const load = async () => {
-    setMsg("Yükleniyor...");
-    const data = await getUsers();
-    setRows(data);
-    setMsg("");
-  };
-
+  async function load() {
+    setMsg("Yükleniyor…");
+    try {
+      const r = await fetch("/api/users?ts=" + Date.now(), { cache: "no-store" });
+      const d = await r.json();
+      setRows(Array.isArray(d) ? d : []);
+      setMsg("");
+    } catch {
+      setMsg("Liste alınamadı");
+    }
+  }
   useEffect(() => { load(); }, []);
 
-  const filtered = useMemo(() => {
-    const s = q.toLowerCase();
-    return rows.filter(r =>
-      r.external_id.includes(q) ||
-      (r.membership_id || "").includes(q) ||
-      (r.first_name || "").toLowerCase().includes(s) ||
-      (r.last_name || "").toLowerCase().includes(s) ||
-      (r.tg_first_name || "").toLowerCase().includes(s) ||
-      (r.tg_last_name || "").toLowerCase().includes(s) ||
-      (r.tg_username || "").toLowerCase().includes(s) ||
-      (r.submitted_username || "").toLowerCase().includes(s) ||
-      (r.status || "").toLowerCase().includes(s)
+  const list = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    if (!s) return rows;
+    return rows.filter(u =>
+      (u.external_id || "").toLowerCase().includes(s) ||
+      (u.first_name || "").toLowerCase().includes(s) ||
+      (u.last_name || "").toLowerCase().includes(s) ||
+      (u.membership_id || "").toLowerCase().includes(s) ||
+      (u.tg_username || "").toLowerCase().includes(s) ||
+      (u.submitted_username || "").toLowerCase().includes(s)
     );
   }, [rows, q]);
 
-  const badge = (st: string) => {
-    const color =
-      st === "member" ? "#16a34a" :
-      st === "pending" ? "#f59e0b" :
-      "#64748b";
-    return (
-      <span style={{ padding: "2px 8px", borderRadius: 999, background: color, color: "#fff", fontSize: 12 }}>
-        {st}
-      </span>
-    );
-  };
-
-  async function addUser() {
+  async function doDelete(external_id: string) {
+    if (!confirm("Silinsin mi?")) return;
     setMsg("");
-    if (!externalId || !membershipId || !submittedUsername) {
-      setMsg("Zorunlu alanlar: Telegram ID, Üyelik ID, Kullanıcı adı");
-      return;
-    }
-    try {
-      const r = await fetch("/api/users", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          external_id: externalId.trim(),
-          membership_id: membershipId.trim(),
-          submitted_username: submittedUsername.trim(),
-          tg_first_name: tgFirst || null,
-          tg_last_name: tgLast || null,
-          tg_username: tgUser || null
-        })
-      });
-      if (!r.ok) {
-        const d = await r.json().catch(() => ({}));
-        setMsg(`Ekleme hatası: ${d.error || r.status}`);
-        return;
-      }
-      setExternalId(""); setMembershipId(""); setSubmittedUsername("");
-      setTgFirst(""); setTgLast(""); setTgUser("");
-      setMsg("Kullanıcı eklendi/güncellendi");
-      load();
-    } catch {
-      setMsg("Ağ hatası");
-    }
+    const r = await fetch(`/api/admin/users/${encodeURIComponent(external_id)}`, { method: "DELETE" });
+    if (!r.ok) { setMsg("Silme hatası"); return; }
+    setMsg("Silindi");
+    await load();
   }
 
-  async function deleteUser(external_id: string) {
-    if (!confirm(`Silinsin mi? Telegram ID: ${external_id}`)) return;
+  function openEdit(u: User) {
+    setEdit(u);
+    setForm({
+      membership_id: u.membership_id || "",
+      first_name: u.first_name || "",
+      last_name: u.last_name || "",
+      tg_username: u.tg_username || "",
+      submitted_username: u.submitted_username || "",
+    });
+  }
+
+  async function saveEdit() {
+    if (!edit) return;
     setMsg("");
-    try {
-      // Not: Bu endpointin backoffice proxy'si olmalı: /api/admin/users/delete (external_id)
-      const r = await fetch("/api/admin/users/delete", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ external_id })
-      });
-      if (!r.ok) {
-        const d = await r.json().catch(() => ({}));
-        setMsg(`Silme hatası: ${d.error || r.status}`);
-        return;
-      }
-      setMsg("Kullanıcı silindi");
-      load();
-    } catch {
-      setMsg("Ağ hatası");
-    }
+    const r = await fetch(`/api/admin/users/${encodeURIComponent(edit.external_id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(form),
+    });
+    if (!r.ok) { setMsg("Güncelleme hatası"); return; }
+    setEdit(null);
+    await load();
   }
 
   return (
     <div>
       <h1>Kullanıcılar</h1>
-
-      <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
-        <input
-          placeholder="Ara: ID, ad, soyad, üyelik, durum, @username"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          style={{ width: 420 }}
-        />
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Ara" style={{ flex: 1, padding: 8 }} />
         <button onClick={load}>Yenile</button>
         {msg && <span>{msg}</span>}
       </div>
 
-      {/* Manuel ekleme / güncelleme */}
-      <div style={{ border: "1px solid #e5e7eb", padding: 12, borderRadius: 8, marginBottom: 16 }}>
-        <h3>Manuel Ekle / Güncelle</h3>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
-          <input placeholder="Telegram ID *" value={externalId} onChange={e=>setExternalId(e.target.value)} />
-          <input placeholder="Üyelik ID *" value={membershipId} onChange={e=>setMembershipId(e.target.value)} />
-          <input placeholder="Kullanıcı adı (yazdığı) *" value={submittedUsername} onChange={e=>setSubmittedUsername(e.target.value)} />
-          <input placeholder="Telegram Ad (opsiyonel)" value={tgFirst} onChange={e=>setTgFirst(e.target.value)} />
-          <input placeholder="Telegram Soyad (opsiyonel)" value={tgLast} onChange={e=>setTgLast(e.target.value)} />
-          <input placeholder="Telegram Username (opsiyonel)" value={tgUser} onChange={e=>setTgUser(e.target.value)} />
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <button onClick={addUser}>Kaydet</button>
-        </div>
-      </div>
-
-      <table border={1} cellPadding={6} style={{ borderCollapse: "collapse", width: "100%", marginTop: 12 }}>
+      <table style={{ width:"100%", borderCollapse:"collapse" }}>
         <thead>
           <tr>
-            <th>#</th>
-            <th>Telegram ID</th>
-            <th>Ad</th>
-            <th>Soyad</th>
-            <th>Üyelik ID</th>
-            <th>Telegram Ad</th>
-            <th>Telegram Soyad</th>
-            <th>Telegram Username</th>
-            <th>Yazdığı Kullanıcı Adı</th>
-            <th>Durum</th>
-            <th>İşlem</th>
+            <th style={th}>Ext ID</th>
+            <th style={th}>Ad</th>
+            <th style={th}>Soyad</th>
+            <th style={th}>RB ID</th>
+            <th style={th}>TG</th>
+            <th style={th}>Durum</th>
+            <th style={th}></th>
           </tr>
         </thead>
         <tbody>
-          {filtered.map(u => (
+          {list.map(u=>(
             <tr key={u.id}>
-              <td>{u.id}</td>
-              <td>{u.external_id}</td>
-              <td>{u.first_name ?? "-"}</td>
-              <td>{u.last_name ?? "-"}</td>
-              <td>{u.membership_id ?? "-"}</td>
-              <td>{u.tg_first_name ?? "-"}</td>
-              <td>{u.tg_last_name ?? "-"}</td>
-              <td>{u.tg_username ? `@${u.tg_username}` : "-"}</td>
-              <td>{u.submitted_username ?? "-"}</td>
-              <td>{badge(u.status)}</td>
-              <td>
-                <button onClick={() => deleteUser(u.external_id)} style={{ color: "red" }}>
-                  Sil
-                </button>
+              <td style={tdMono}>{u.external_id}</td>
+              <td style={td}>{u.first_name||""}</td>
+              <td style={td}>{u.last_name||""}</td>
+              <td style={td}>{u.membership_id||""}</td>
+              <td style={td}>{u.tg_username||""}</td>
+              <td style={td}>{u.status}</td>
+              <td style={td}>
+                <button onClick={()=>openEdit(u)}>Düzenle</button>{" "}
+                <button onClick={()=>doDelete(u.external_id)} style={{ color:"red" }}>Sil</button>
               </td>
             </tr>
           ))}
-          {!filtered.length && (
-            <tr>
-              <td colSpan={11} style={{ textAlign: "center", color: "#667085" }}>
-                Kayıt yok
-              </td>
-            </tr>
-          )}
+          {!list.length && <tr><td colSpan={7} style={{ padding:12, color:"#666" }}>Kayıt yok</td></tr>}
         </tbody>
       </table>
+
+      {edit && (
+        <div style={panel}>
+          <h3>Düzenle: <code>{edit.external_id}</code></h3>
+          <label>RB Üyelik ID</label>
+          <input value={form.membership_id as string || ""} onChange={e=>setForm(f=>({ ...f, membership_id: e.target.value }))} />
+          <label>Ad</label>
+          <input value={form.first_name as string || ""} onChange={e=>setForm(f=>({ ...f, first_name: e.target.value }))} />
+          <label>Soyad</label>
+          <input value={form.last_name as string || ""} onChange={e=>setForm(f=>({ ...f, last_name: e.target.value }))} />
+          <label>Telegram Username</label>
+          <input value={form.tg_username as string || ""} onChange={e=>setForm(f=>({ ...f, tg_username: e.target.value }))} />
+          <label>Gönderdiği Kullanıcı Adı</label>
+          <input value={form.submitted_username as string || ""} onChange={e=>setForm(f=>({ ...f, submitted_username: e.target.value }))} />
+          <div style={{ display:"flex", gap:8, marginTop:8 }}>
+            <button onClick={saveEdit}>Kaydet</button>
+            <button onClick={()=>setEdit(null)}>Kapat</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+
+const th: React.CSSProperties = { textAlign:"left", borderBottom:"1px solid #ddd", padding:8 };
+const td: React.CSSProperties = { borderBottom:"1px solid #f1f5f9", padding:8, verticalAlign:"top" };
+const tdMono: React.CSSProperties = { ...td, fontFamily:"ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" };
+const panel: React.CSSProperties = { marginTop:16, padding:12, border:"1px solid #ddd", background:"#fafafa", maxWidth:480 };
