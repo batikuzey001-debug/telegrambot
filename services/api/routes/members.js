@@ -4,7 +4,7 @@ import { pool } from "../db.js";
 export function membersRouter(auth) {
   const r = Router();
 
-  r.get("/:membership_id", async (req,res)=>{
+  r.get("/members/:membership_id", async (req,res)=>{
     const { rows } = await pool.query(
       "SELECT membership_id,first_name,last_name FROM members WHERE membership_id=$1 LIMIT 1",
       [req.params.membership_id]
@@ -14,7 +14,7 @@ export function membersRouter(auth) {
     res.json({ found:true, membership_id:m.membership_id, first_name:m.first_name, last_name:m.last_name });
   });
 
-  r.post("/admin/import", auth, async (req,res)=>{
+  r.post("/admin/members/import", auth, async (req,res)=>{
     const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
     if (!rows.length) return res.status(400).json({ error:"empty" });
     const client = await pool.connect();
@@ -40,13 +40,15 @@ export function membersRouter(auth) {
     }finally{ client.release(); }
   });
 
+  // BAŞVURU: artık full_name zorunlu değil
   r.post("/pending-requests", async (req,res)=>{
     const { external_id, provided_membership_id, full_name, notes } = req.body || {};
-    if (!external_id || !full_name) return res.status(400).json({ error:"external_id_and_full_name_required" });
+    if (!external_id) return res.status(400).json({ error: "external_id_required" });
     const { rows } = await pool.query(
-      `INSERT INTO pending_verifications (external_id,provided_membership_id,full_name,notes)
-       VALUES ($1,$2,$3,$4) RETURNING id,status`,
-      [String(external_id), provided_membership_id || null, String(full_name), notes || null]
+      `INSERT INTO pending_verifications (external_id, provided_membership_id, full_name, notes)
+       VALUES ($1,$2,$3,$4)
+       RETURNING id, status`,
+      [String(external_id), provided_membership_id || null, full_name || null, notes || null]
     );
     res.json(rows[0]);
   });
@@ -71,15 +73,16 @@ export function membersRouter(auth) {
       if (!cur.length) { await client.query("ROLLBACK"); return res.status(404).json({ error:"not_found" }); }
       const p = cur[0];
 
+      let fn=null, ln=null;
+      if (p.full_name) {
+        const parts = String(p.full_name).trim().split(/\s+/);
+        fn = parts.shift() || null;
+        ln = parts.length ? parts.join(" ") : null;
+      }
+
       if (action === "approve") {
-        let fn=null, ln=null;
-        if (p.full_name) {
-          const parts = String(p.full_name).trim().split(/\s+/);
-          fn = parts.shift() || null;
-          ln = parts.length ? parts.join(" ") : null;
-        }
         if (p.provided_membership_id) {
-          const { rows:mem } = await client.query(
+          const { rows: mem } = await client.query(
             "SELECT first_name,last_name FROM members WHERE membership_id=$1",
             [p.provided_membership_id]
           );
@@ -126,11 +129,8 @@ export function membersRouter(auth) {
 
   r.put("/admin/users/link", auth, async (req,res)=>{
     const { external_id, membership_id } = req.body || {};
-    if (!external_id || !membership_id) return res.status(400).json({ error:"required" });
-    const { rows:mem } = await pool.query(
-      "SELECT first_name,last_name FROM members WHERE membership_id=$1",
-      [membership_id]
-    );
+    if (!external_id || !membership_id) return res.status(400).json({ error: "required" });
+    const { rows: mem } = await pool.query("SELECT first_name,last_name FROM members WHERE membership_id=$1",[membership_id]);
     const fn = mem[0]?.first_name || null;
     const ln = mem[0]?.last_name || null;
     const { rows } = await pool.query(
