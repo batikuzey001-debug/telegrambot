@@ -8,6 +8,8 @@ import { membersRouter } from "./routes/members.js";
 import { rafflesRouter } from "./routes/raffles.js";
 import { notificationsRouter } from "./routes/notifications.js";
 
+console.log("BOOT FROM:", import.meta.url);
+
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 
 const app = express();
@@ -19,11 +21,11 @@ const auth = makeAuth(ADMIN_TOKEN);
 app.get("/", (_req, res) => res.json({ ok: true }));
 
 // routes
-app.use("/messages", messagesRouter(auth));                  // /messages, /messages/:key, /messages/admin/:key, /messages/bot/:key/file-id
-app.use("/users", usersRouter());                            // /users...
-app.use("/", membersRouter(auth));                           // /members/:id, /admin/members/import, /pending-requests, ...
-app.use("/", rafflesRouter(auth));                           // /raffle/enter, /raffles/active, /raffles/admin...
-app.use("/admin/notifications", notificationsRouter(auth));  // /admin/notifications/templates, /admin/notifications/send ...
+app.use("/messages", messagesRouter(auth));                   // /messages, /messages/:key, /messages/admin/:key, /messages/bot/:key/file-id
+app.use("/users", usersRouter(auth));                         // upsert/list/status + /users/admin/:external_id (DELETE) uses auth
+app.use("/", membersRouter(auth));                            // /members/:id, /admin/members/import, /pending-requests, ...
+app.use("/", rafflesRouter(auth));                            // /raffle/enter, /raffles/active, /raffles/admin...
+app.use("/admin/notifications", notificationsRouter(auth));   // /admin/notifications/templates, /admin/notifications/send, /admin/notifications/_health
 
 // 404
 app.use((req, res) => res.status(404).json({ error: "not_found" }));
