@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 
-/** List messages (server-side proxy) */
-export async function GET() {
-  const API_URL = process.env.API_URL || process.env.NEXT_PUBLIC_API_URL;
-  const ADMIN_TOKEN = process.env.ADMIN_TOKEN || process.env.NEXT_PUBLIC_ADMIN_TOKEN;
-  if (!API_URL || !ADMIN_TOKEN) return NextResponse.json({ error: "misconfigured" }, { status: 500 });
+const val = (s?: string | null) => (s ?? "").toString().trim();
+const API_URL = val(process.env.API_URL) || val(process.env.API_BASE) || val(process.env.NEXT_PUBLIC_API_URL);
+const ADMIN_TOKEN = val(process.env.ADMIN_TOKEN) || val(process.env.NEXT_PUBLIC_ADMIN_TOKEN);
 
+// GET /api/admin/messages  ->  GET {API_URL}/admin/messages
+export async function GET() {
+  if (!API_URL || !ADMIN_TOKEN) return NextResponse.json({ error: "misconfigured" }, { status: 500 });
   const r = await fetch(`${API_URL}/admin/messages`, {
     headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
     cache: "no-store",
