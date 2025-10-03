@@ -9,7 +9,7 @@ const {
   BOT_TOKEN, CHANNEL_USERNAME, APP_URL,
   CACHE_TTL_MS, BOT_WRITE_SECRET,
   SOCIAL_URL, SIGNUP_URL, ADMIN_NOTIFY_SECRET,
-  CACHE_SECRET, PORT
+  CACHE_SECRET
 } = process.env;
 
 if (!BOT_TOKEN || !CHANNEL_USERNAME || !APP_URL) throw new Error("missing env");
@@ -28,7 +28,7 @@ const api = axios.create({
 const bot = new Telegraf(BOT_TOKEN);
 
 /* ---------------- In-process cache (messages) ---------------- */
-const cache = new Map(); // key -> { value, exp }
+const cache = new Map();
 const getCached = (k) => {
   const it = cache.get(k);
   return it && it.exp > Date.now() ? it.value : null;
@@ -69,9 +69,7 @@ async function sendMessageByKey(ctx, key, extra, stOpt) {
   const msg = await getMessage(key);
   const content = personalize(st, msg.content);
 
-  if (msg.file_id) {
-    return ctx.replyWithPhoto(msg.file_id, { caption: content, ...extra });
-  }
+  if (msg.file_id) return ctx.replyWithPhoto(msg.file_id, { caption: content, ...extra });
 
   if (msg.image_url) {
     try {
@@ -133,9 +131,9 @@ const KB = {
 };
 
 /* ---------------- Light state + debouncer ---------------- */
-const state = new Map(); // uid -> { stage, awaiting?, newUser? }
+const state = new Map();
 const S = (uid) => { if (!state.has(uid)) state.set(uid, { stage: "ROOT" }); return state.get(uid); };
-const lastStart = new Map(); // uid -> ts
+const lastStart = new Map();
 
 /* ---------------- Ack middleware: spinner fix ---------------- */
 bot.use(async (ctx, next) => {
@@ -170,7 +168,7 @@ async function routeHome(ctx) {
 bot.start(async (ctx) => {
   const now = Date.now();
   const prev = lastStart.get(ctx.from.id) || 0;
-  if (now - prev < 1500) return; // debounce
+  if (now - prev < 1500) return;
   lastStart.set(ctx.from.id, now);
 
   const payload = ctx.startPayload;
@@ -438,7 +436,9 @@ httpApp.post("/invalidate", (req,res)=>{
   return res.json({ ok:true });
 });
 
-httpApp.listen(Number(PORT || 3001), ()=> console.log(`bot http on :${Number(PORT || 3001)}`));
+// Railway PORT: platformdan al (custom PORT env'yi kullanma)
+const PORT_USE = process.env.PORT || "3000";
+httpApp.listen(Number(PORT_USE), ()=> console.log(`bot http on :${PORT_USE}`));
 
 /* ---------------- Launch (single instance, conflict-safe) ---------------- */
 async function bootstrap() {
