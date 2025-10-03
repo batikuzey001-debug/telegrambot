@@ -1,37 +1,35 @@
-import express from "express";
-import crypto from "node:crypto";
-import { initDb } from "./db.js";
-import { makeAuth } from "./middleware/auth.js";
-import { messagesRouter } from "./routes/messages.js";
-import { usersRouter } from "./routes/users.js";
-import { membersRouter } from "./routes/members.js";
-import { rafflesRouter } from "./routes/raffles.js";
-import { dmRouter } from "./routes/dm.js"; // <-- sadece DM
+import { Router } from "express";
 
-console.log("BOOT FROM:", import.meta.url);
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
+const BOT_DM_URL = process.env.BOT_DM_URL || process.env.BOT_NOTIFY_URL || "";
+const ADMIN_NOTIFY_SECRET = process.env.ADMIN_NOTIFY_SECRET || "";
 
-const app = express();
-app.disable("x-powered-by");
-app.use(express.json());
+export function dmRouter(auth){
+  const r = Router();
 
-// log
-app.use((req,_res,next)=>{ req._rid=crypto.randomUUID(); const p=req.method!=="GET"? (JSON.stringify(req.body)||"").slice(0,500):""; console.log(`[REQ ${req._rid}] ${req.method} ${req.url} ${p}`); next(); });
+  // Tek kişiye DM: { external_id, text, image_url?, buttons? }
+  r.post("/admin/dm", auth, async (req,res)=>{
+    if (!BOT_DM_URL || !ADMIN_NOTIFY_SECRET) return res.status(500).json({ error:"misconfigured_bot_dm" });
+    const { external_id, text, image_url, buttons } = req.body || {};
+    if (!external_id || !text) return res.status(400).json({ error:"required" });
 
-app.get("/",(_req,res)=>res.json({ok:true}));
-app.get("/_whoami",(_req,res)=>res.json({boot:import.meta.url,time:new Date().toISOString()}));
+    try{
+      const r2 = await fetch(BOT_DM_URL, {
+        method:"POST",
+        headers:{ "Content-Type":"application/json", "x-admin-secret": ADMIN_NOTIFY_SECRET },
+        body: JSON.stringify({
+          external_id: String(external_id),
+          text: String(text),
+          image_url: image_url || null,
+          buttons: Array.isArray(buttons) ? buttons : []
+        })
+      });
+      const out = await r2.text();
+      return res.status(r2.status).type("application/json").send(out);
+    }catch(e){
+      console.error("[API DM ERR]", e?.message || e);
+      return res.status(502).json({ error:"bot_unreachable" });
+    }
+  });
 
-const auth = makeAuth(ADMIN_TOKEN);
-
-// routes (notifications YOK)
-app.use("/messages", messagesRouter(auth));
-app.use("/users", usersRouter(auth));
-app.use("/", membersRouter(auth));
-app.use("/", rafflesRouter(auth));
-app.use("/", dmRouter(auth)); // POST /admin/dm
-
-app.use((req,res)=>res.status(404).json({error:"not_found"}));
-app.use((err,req,res,_next)=>{const pg=err?.code?{code:err.code,detail:err.detail,where:err.where,position:err.position}:null;console.error(`[ERR ${req._rid||"-"}]`,err?.message||err,pg||"");res.status(500).json({error:"internal_error",rid:req._rid||"-"});});
-
-const port = process.env.PORT || 3000;
-initDb().then(()=>app.listen(port,()=>console.log(`API on :${port}`))).catch(e=>{console.error("DB init error",e);process.exit(1);});
+  return r;
+}
