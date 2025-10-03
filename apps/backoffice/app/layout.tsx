@@ -15,10 +15,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <a href="/pending" style={linkStyle}>Bekleyen Doğrulamalar</a>
               <a href="/raffles" style={linkStyle}>Kampanyalar</a>
               <a href="/raffle" style={linkStyle}>Kampanya Katılımcıları</a>
-              <a href="/notifications" style={linkStyle}>Bildirimler</a>
               <a href="/admin/messages" style={linkStyle}>Mesajlar</a>
               <div style={{ height: 8, borderBottom: "1px solid #1f2937", margin: "8px 0" }} />
-              <a href="/admin/notifications/send" style={linkStyle}>Bildirim Gönder</a>
+              <a href="/admin/dm" style={linkStyle}>Kişiye Özel Mesaj</a>
             </nav>
           </aside>
           <main style={{ flex: 1, padding: 24 }}>{children}</main>
